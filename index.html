@@ -459,6 +459,10 @@ button{cursor:pointer;border:none;background:none}
   .msgs{padding:10px 10px}
 }
 </style>
+<link rel="manifest" id="pwaManifest">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="PULSE">
 </head>
 <body>
 <!-- AUTH -->
@@ -680,6 +684,28 @@ button{cursor:pointer;border:none;background:none}
 <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-auth-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-database-compat.js"></script>
 <script>
+
+/* ═══ PWA MANIFEST ═══ */
+(function(){
+  const manifest={
+    name:"PULSE — Chat & Finance",
+    short_name:"PULSE",
+    description:"Real-time chat and finance tracker",
+    start_url:"./",
+    display:"standalone",
+    background_color:"#080c12",
+    theme_color:"#0ea5e9",
+    orientation:"portrait",
+    icons:[
+      {src:"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Crect width='100' height='100' rx='22' fill='%230ea5e9'/%3E%3Ctext y='.9em' font-size='80' x='10'%3E%E2%9A%A1%3C/text%3E%3C/svg%3E",sizes:"192x192",type:"image/svg+xml"},
+      {src:"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Crect width='100' height='100' rx='22' fill='%230ea5e9'/%3E%3Ctext y='.9em' font-size='80' x='10'%3E%E2%9A%A1%3C/text%3E%3C/svg%3E",sizes:"512x512",type:"image/svg+xml"}
+    ]
+  };
+  const blob=new Blob([JSON.stringify(manifest)],{type:'application/json'});
+  const url=URL.createObjectURL(blob);
+  document.getElementById('pwaManifest').href=url;
+})();
+
 /* ═══ CONSTANTS ═══ */
 const ECATS=['🍔 Food','🚗 Transport','🏠 Housing','⚡ Utilities','🏥 Health','👗 Shopping','🎮 Entertainment','📚 Education','✈️ Travel','🍺 Dining','💡 Other'];
 const ICATS=['💼 Salary','💰 Freelance','📈 Investments','🎁 Gift','🏠 Rental','⭐ Bonus','🛒 Refund','💡 Other'];
@@ -791,8 +817,10 @@ if(_BC) _BC.onmessage = e => {
 /* Called once after login — subscribes to live changes from any device */
 function setupFirebaseSync(){
   if(!FB_READY || !DB_FB) return;
+  // Tear down existing listeners before re-attaching
   Object.values(_fbListeners).forEach(off=>{try{if(typeof off==='function')off()}catch(e){}});
   _fbListeners={};
+  window._syncCurrentChat=null; // reset so openChat re-attaches
 
   // ── Sync all users (so names always resolve) ──
   const usRef=DB_FB.ref('pulse/p3_users');
@@ -820,18 +848,22 @@ function setupFirebaseSync(){
     if(!AC)return;
     // Listen on per-message nodes
     const mRef=DB_FB.ref('pulse/msgs/'+AC);
+    let _lastMsgCount=gMsgs(AC).length;
     const mHandler=mRef.on('value',snap=>{
       if(!snap.exists()){
         localStorage.setItem('p3_m_'+AC,JSON.stringify([]));
-        renderMsgs();return;
+        _lastMsgCount=0; renderMsgs(); return;
       }
       const val=snap.val();
-      // Convert object of messages to sorted array
       const msgs=Object.values(val).sort((a,b)=>a.ts-b.ts);
       localStorage.setItem('p3_m_'+AC,JSON.stringify(msgs));
-      renderMsgs();
-      // Auto mark read
-      markRead(AC);
+      // Only re-render if message count changed (new message arrived)
+      // This prevents interrupting voice playback on minor updates
+      if(msgs.length!==_lastMsgCount){
+        _lastMsgCount=msgs.length;
+        renderMsgs();
+        markRead(AC);
+      }
     });
     _fbListeners.msgs_off=()=>mRef.off('value',mHandler);
   }
@@ -1116,28 +1148,24 @@ function doLogin(){
 }
 
 function loginAs(u){
+  if(!u||!u.id){console.warn('loginAs called with invalid user',u);return;}
+  // Prevent duplicate logins (onAuthStateChanged can fire multiple times)
+  if(window._appInited && ME && ME.id===u.id) return;
+  window._appInited=true;
   ME=u;
   localStorage.setItem('p3_sess',u.id);
   document.getElementById('authWall').style.display='none';
   document.getElementById('app').style.display='block';
   isMuted=DB.g('p3_mute_'+ME.id,{});
   thMode=localStorage.getItem('p3_theme')||'auto';
-  // Pull all cloud data into localStorage before init
   if(FB_READY && DB_FB){
-    const keys=['p3_users','p3_chats','p3_tx','p3_buds'];
-    let loaded=0;
-    keys.forEach(k=>{
-      const fbKey=k.replace(/[.#$[\]/]/g,'_');
-      DB_FB.ref('pulse/'+fbKey).once('value').then(snap=>{
-        if(snap.exists()){
-          const val=snap.val();
-          const arr=Array.isArray(val)?val:(typeof val==='object'&&val!==null?val:null);
-          if(arr)localStorage.setItem(k,JSON.stringify(arr));
-        }
-        loaded++;
-        if(loaded===keys.length){ initApp(); setupFirebaseSync(); }
-      }).catch(()=>{ loaded++; if(loaded===keys.length){ initApp(); setupFirebaseSync(); } });
-    });
+    // Pull latest data from Firebase then start app
+    Promise.all([
+      DB_FB.ref('pulse/p3_users').once('value').then(s=>{if(s.exists())localStorage.setItem('p3_users',JSON.stringify(s.val()));}).catch(()=>{}),
+      DB_FB.ref('pulse/p3_chats').once('value').then(s=>{if(s.exists())localStorage.setItem('p3_chats',JSON.stringify(s.val()));}).catch(()=>{}),
+      DB_FB.ref('pulse/p3_tx').once('value').then(s=>{if(s.exists()){const v=s.val();localStorage.setItem('p3_tx',JSON.stringify(Array.isArray(v)?v:Object.values(v||{})));} }).catch(()=>{}),
+      DB_FB.ref('pulse/p3_buds').once('value').then(s=>{if(s.exists())localStorage.setItem('p3_buds',JSON.stringify(s.val()));}).catch(()=>{}),
+    ]).finally(()=>{ initApp(); setupFirebaseSync(); });
   } else {
     initApp();
   }
@@ -1247,7 +1275,12 @@ function openChat(id){
   markRead(id);renderMsgs();renderChatList();
   setTimeout(()=>document.getElementById('chatIn').focus(),100);
 }
-function goBack(){document.getElementById('chatSB').classList.remove('hide');document.getElementById('backMb').style.display='none'}
+function goBack(){
+  document.getElementById('chatSB').classList.remove('hide');
+  document.getElementById('backMb').style.display='none';
+  // Keep chatView alive - don't hide it
+  // This prevents the "goes back and closes everything" issue
+}
 function updateChatSub(){if(!AC)return;const c=gChats()[AC];if(!c)return;const us=gUsers();let sub='';if(c.type==='grp')sub=c.members.length+' members';else{const o=chatOther(c,us);sub=o?.online?'🟢 online':o?.seen?'Last seen '+fmtT(o.seen):'Offline'}document.getElementById('mhSb').textContent=sub}
 function markRead(id){const msgs=gMsgs(id);let ch=false;msgs.forEach(m=>{if(m.uid!==ME.id&&!(m.rb||[]).includes(ME.id)){m.rb=[...(m.rb||[]),ME.id];ch=true}});if(ch)DB.s('p3_m_'+id,msgs,true)}  /* silent! */
 
@@ -1319,15 +1352,31 @@ function renderVoice(m){
 }
 function playVoice(id,btn){
   const m=gMsgs(AC).find(x=>x.id===id);if(!m?.audioB64)return;
+  // Stop any currently playing voice
+  if(window._playingAudio){try{window._playingAudio.pause();window._playingAudio.currentTime=0;}catch(e){}}
+  if(window._playingBarAnim){clearInterval(window._playingBarAnim);}
   const audio=new Audio(m.audioB64);
+  window._playingAudio=audio;
   const bars=document.getElementById('vwv_'+id)?.querySelectorAll('.vb');
   btn.textContent='⏸';
-  const total=bars?.length||25,durMs=(m.durSecs||3)*1000;
-  let i=0;const step=durMs/total;
-  const t=setInterval(()=>{if(i<total){bars[i]?.classList.add('played');i++}else clearInterval(t)},step);
-  audio.play().catch(()=>{});
-  audio.onended=()=>{clearInterval(t);btn.textContent='▶';bars?.forEach(b=>b.classList.remove('played'))};
-  audio.onerror=()=>{clearInterval(t);btn.textContent='▶'};
+  audio.addEventListener('loadedmetadata',()=>{
+    const durMs=audio.duration*1000||3000;
+    const total=bars?.length||25;
+    const step=durMs/total;
+    let i=0;
+    window._playingBarAnim=setInterval(()=>{
+      if(i<total){bars[i]?.classList.add('played');i++}
+      else clearInterval(window._playingBarAnim);
+    },step);
+  });
+  audio.play().catch(()=>{btn.textContent='▶'});
+  audio.onended=()=>{
+    clearInterval(window._playingBarAnim);
+    btn.textContent='▶';
+    bars?.forEach(b=>b.classList.remove('played'));
+    window._playingAudio=null;
+  };
+  audio.onerror=()=>{clearInterval(window._playingBarAnim);btn.textContent='▶';};
 }
 function fakeVoice(id,btn){
   const bars=document.getElementById('vwv_'+id)?.querySelectorAll('.vb');if(!bars)return;
@@ -1415,12 +1464,13 @@ function onKey(e){if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();onSend()}}
 function trgFile(t){closeMenus();if(t==='img'||t==='vid'){document.getElementById('iIn').accept=t==='img'?'image/*':'video/*';document.getElementById('iIn').click()}else document.getElementById('fIn').click()}
 function onImg(inp){
   const f=inp.files[0];if(!f||!AC)return;
-  if(f.size>50*1024*1024){toast('Image/video too large (max 50MB)','err');inp.value='';return;}
+  inp.value='';closeMenus();
+  if(f.size>50*1024*1024){toast('Max image/video size is 50MB','err');return;}
+  toast('Sending…','info');
   const r=new FileReader();
-  r.onload=e=>push({type:'img',data:e.target.result,fname:f.name});
+  r.onload=e=>push({type:'img',data:e.target.result,fname:f.name,ftype:f.type});
   r.onerror=()=>toast('Could not read file','err');
   r.readAsDataURL(f);
-  inp.value='';closeMenus();
 }
 function sendLoc(){closeMenus();if(!navigator.geolocation){push({type:'loc',lat:33.68,lng:73.05});return}navigator.geolocation.getCurrentPosition(p=>push({type:'loc',lat:p.coords.latitude,lng:p.coords.longitude}),()=>push({type:'loc',lat:33.68,lng:73.05}))}
 
@@ -1651,10 +1701,13 @@ function connectCall(){
   if(!document.getElementById('callScr').classList.contains('on'))return;
   callConnected=true;stopRingTone();
   document.getElementById('csRing').classList.remove('ringing');
-  document.getElementById('csStatus').textContent=callType==='video'?'📹 Connected':'📞 Connected';
+  document.getElementById('csStatus').textContent=callType==='video'?'📹 Connected — use speakerphone':'📞 Connected — use speakerphone';
   document.getElementById('csTimer').style.display='block';
   clearInterval(callTimer);
   callTimer=setInterval(()=>{callSecs++;const m=Math.floor(callSecs/60),s=callSecs%60;document.getElementById('csTimer').textContent=(m<10?'0':'')+m+':'+(s<10?'0':'')+s},1000);
+  // Note: peer-to-peer audio requires a signaling server (WebRTC).
+  // This app uses Firebase for messaging - voice/video is coming in next update.
+  toast('Call connected — full WebRTC audio coming soon','info');
 }
 function endCall(){
   clearInterval(callTimer);callTimer=null;stopRingTone();
@@ -1956,6 +2009,8 @@ window.matchMedia('(prefers-color-scheme:dark)').addEventListener('change',()=>{
 /* ═══ BOOT ═══ */
 /* Called once Firebase is confirmed ready (or failed) */
 function triggerAuthCheck(){
+  if(window._authCheckDone) return; // prevent duplicate auth checks
+  window._authCheckDone=true;
   if(FB_READY && AUTH){
     AUTH.onAuthStateChanged(firebaseUser=>{
       if(!firebaseUser){
@@ -2066,5 +2121,689 @@ function applyFbConfig(cfg){
   Object.assign(FIREBASE_CONFIG, cfg);
 }
 </script>
+</body>
+</html>function onFile(inp){
+  const f=inp.files[0];if(!f||!AC)return;
+  inp.value='';closeMenus();
+  if(f.size>100*1024*1024){toast('Max file size is 100MB','err');return;}
+  toast('Sending '+f.name+'…','info');
+  const r=new FileReader();
+  r.onload=e=>push({type:'file',data:e.target.result,fname:f.name,fsz:fmtSz(f.size),ftype:f.type||'application/octet-stream'});
+  r.onerror=()=>toast('Could not read file — try smaller file','err');
+  r.readAsDataURL(f);
+}
+/* Emoji font FIRST so all emojis render on Android/Chrome */
+html,body{
+  height:100%;overflow:hidden;
+  font-family:"Apple Color Emoji","Segoe UI Emoji","Noto Color Emoji","Twemoji Mozilla","DM Sans",sans-serif;
+  -webkit-font-smoothing:antialiased;-webkit-text-size-adjust:100%;
+  background:var(--bg);color:var(--t);
+}
+/* Non-emoji text uses DM Sans */
+.dm{font-family:"DM Sans",sans-serif}
+input,textarea,select,button{
+  font-family:"Apple Color Emoji","Segoe UI Emoji","Noto Color Emoji","DM Sans",sans-serif;
+  color:var(--t);
+}
+img{object-fit:cover}
+button{cursor:pointer;border:none;background:none}
+::-webkit-scrollbar{width:3px}
+::-webkit-scrollbar-thumb{background:var(--bg5);border-radius:3px}
+
+/* TOKENS */
+:root{
+  --p:#0ea5e9;--p2:#38bdf8;--pg:rgba(14,165,233,.2);--pg2:rgba(14,165,233,.08);
+  --green:#22c55e;--red:#f43f5e;--amber:#f59e0b;--purple:#8b5cf6;
+  --ig:rgba(34,197,94,.13);--eg:rgba(244,63,94,.13);
+  --ease:cubic-bezier(.4,0,.2,1);--spring:cubic-bezier(.34,1.56,.64,1);
+  --r:16px;--rsm:11px;
+}
+/* DARK (default) */
+:root,[data-t=dark]{
+  --bg:#080c12;--bg1:#0d1117;--bg2:#161b24;--bg3:#1c2333;--bg4:#242e42;--bg5:#2d3a52;
+  --gl:rgba(255,255,255,.03);--gl2:rgba(255,255,255,.06);
+  --b:rgba(255,255,255,.07);--b2:rgba(255,255,255,.13);
+  --t:#e8edf5;--t2:#8899b0;--t3:#4a5568;
+  --bme:linear-gradient(145deg,#0e3a6e,#0f2744);--bthem:#1c2333;
+  --sh:0 8px 40px rgba(0,0,0,.6);--ss:0 2px 12px rgba(0,0,0,.4);
+}
+/* LIGHT */
+[data-t=light]{
+  --bg:#f0f4f8;--bg1:#fff;--bg2:#f8fafc;--bg3:#eef2f7;--bg4:#e2e8f0;--bg5:#d0dae8;
+  --gl:rgba(0,0,0,.02);--gl2:rgba(0,0,0,.04);
+  --b:rgba(0,0,0,.07);--b2:rgba(0,0,0,.12);
+  --t:#0d1117;--t2:#4a5568;--t3:#94a3b8;
+  --bme:linear-gradient(145deg,#0ea5e9,#0284c7);--bthem:#fff;
+  --sh:0 8px 40px rgba(0,0,0,.1);--ss:0 2px 12px rgba(0,0,0,.07);
+}
+@media(prefers-color-scheme:light){:root:not([data-t]){
+  --bg:#f0f4f8;--bg1:#fff;--bg2:#f8fafc;--bg3:#eef2f7;--bg4:#e2e8f0;--bg5:#d0dae8;
+  --gl:rgba(0,0,0,.02);--gl2:rgba(0,0,0,.04);--b:rgba(0,0,0,.07);--b2:rgba(0,0,0,.12);
+  --t:#0d1117;--t2:#4a5568;--t3:#94a3b8;
+  --bme:linear-gradient(145deg,#0ea5e9,#0284c7);--bthem:#fff;
+  --sh:0 8px 40px rgba(0,0,0,.1);--ss:0 2px 12px rgba(0,0,0,.07);
+}}
+
+/* AUTH */
+/* Google Sign-In button */
+.gbtn{width:100%;padding:12px;border-radius:11px;background:#fff;color:#333;font-size:14px;font-weight:700;border:1px solid #ddd;display:flex;align-items:center;justify-content:center;gap:10px;cursor:pointer;transition:.18s;margin-top:8px;box-shadow:0 1px 6px rgba(0,0,0,.12)}
+.gbtn:hover{box-shadow:0 3px 12px rgba(0,0,0,.18);transform:translateY(-1px)}
+.gbtn svg{width:20px;height:20px;flex-shrink:0}
+.gor{display:flex;align-items:center;gap:10px;margin:12px 0;color:var(--t3);font-size:12px;font-weight:600}
+.gor::before,.gor::after{content:'';flex:1;height:1px;background:var(--b)}
+
+#authWall{position:fixed;inset:0;background:var(--bg);display:flex;align-items:center;justify-content:center;z-index:9000;padding:16px}
+.ac{width:100%;max-width:400px;animation:suIn .5s var(--spring) both}
+@keyframes suIn{from{opacity:0;transform:translateY(28px)}to{opacity:1;transform:none}}
+.abrand{text-align:center;margin-bottom:20px}
+.abrand-ic{display:inline-flex;align-items:center;justify-content:center;width:60px;height:60px;border-radius:18px;background:linear-gradient(135deg,var(--p),var(--purple));box-shadow:0 0 40px var(--pg);font-size:28px;margin-bottom:10px}
+.abrand h1{font-size:28px;font-weight:800;letter-spacing:-1px;background:linear-gradient(135deg,var(--t),var(--p));-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text}
+.abrand p{font-size:13px;color:var(--t2);margin-top:3px}
+.abox{background:var(--bg1);border:1px solid var(--b2);border-radius:22px;padding:24px;box-shadow:var(--sh)}
+.seg{display:flex;background:var(--bg3);border-radius:11px;padding:3px;gap:3px;margin-bottom:18px}
+.seg button{flex:1;padding:9px;border-radius:9px;font-size:13px;font-weight:600;color:var(--t3);transition:.2s}
+.seg button.on{background:var(--p);color:#fff;box-shadow:0 2px 10px var(--pg)}
+.fp{display:none}.fp.on{display:block}
+.avup{width:66px;height:66px;border-radius:50%;background:var(--bg3);border:2px dashed var(--b2);display:flex;flex-direction:column;align-items:center;justify-content:center;cursor:pointer;margin:0 auto 14px;overflow:hidden;transition:.2s;position:relative}
+.avup:hover{border-color:var(--p)}
+.avup img{width:100%;height:100%;object-fit:cover;border-radius:50%;display:none}
+.avup .aic{font-size:22px;color:var(--t3)}.avup .alb{font-size:9px;color:var(--t3);font-weight:700;text-transform:uppercase}
+.fg{margin-bottom:12px}.fl{display:block;font-size:10px;font-weight:700;color:var(--t3);text-transform:uppercase;letter-spacing:.09em;margin-bottom:5px}
+.fi{width:100%;background:var(--bg3);border:1px solid var(--b);border-radius:10px;padding:11px 13px;font-size:14px;outline:none;transition:.2s}
+.fi:focus{border-color:var(--p);box-shadow:0 0 0 3px var(--pg2)}.fi::placeholder{color:var(--t3)}
+.f2{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.cbtn{width:100%;padding:13px;border-radius:11px;background:var(--p);color:#fff;font-size:15px;font-weight:700;transition:.2s;box-shadow:0 4px 18px var(--pg);margin-top:4px}
+.cbtn:hover{transform:translateY(-1px)}
+.aerr{background:var(--eg);border:1px solid rgba(244,63,94,.25);border-radius:9px;padding:9px 13px;font-size:13px;color:var(--red);margin-bottom:12px;display:none}
+.aalt{text-align:center;font-size:13px;color:var(--t2);margin-top:12px}.aalt a{color:var(--p);font-weight:600;cursor:pointer}
+
+/* APP SHELL */
+#app{display:none;height:100vh;overflow:hidden;position:relative}
+
+/* DOCK */
+.dock{position:fixed;left:0;top:0;bottom:0;width:62px;background:var(--bg1);border-right:1px solid var(--b);display:flex;flex-direction:column;align-items:center;padding:14px 0;gap:3px;z-index:100}
+.dlogo{width:36px;height:36px;border-radius:11px;background:linear-gradient(135deg,var(--p),var(--purple));display:flex;align-items:center;justify-content:center;font-size:18px;margin-bottom:12px;box-shadow:0 2px 12px var(--pg);flex-shrink:0}
+.dbtn{width:40px;height:40px;border-radius:12px;display:flex;align-items:center;justify-content:center;font-size:20px;color:var(--t3);transition:.18s;position:relative;flex-shrink:0;cursor:pointer;border:none;background:none}
+.dbtn:hover{background:var(--gl2);color:var(--t2)}.dbtn.on{background:var(--pg2);color:var(--p)}
+.nbadge{position:absolute;top:-3px;right:-3px;width:16px;height:16px;border-radius:50%;background:var(--red);color:#fff;font-size:9px;font-weight:700;display:none;align-items:center;justify-content:center;border:2px solid var(--bg1)}
+.nbadge.on{display:flex}
+.dsp{flex:1}
+.dav{width:34px;height:34px;border-radius:10px;object-fit:cover;cursor:pointer;border:2px solid transparent;transition:.2s;display:block;flex-shrink:0}
+.dav:hover,.dav-ph:hover{border-color:var(--p)!important}
+.dav-ph{width:34px;height:34px;border-radius:10px;display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:800;color:#fff;cursor:pointer;border:2px solid transparent;transition:.2s;flex-shrink:0}
+
+/* CONTENT */
+.content{position:fixed;left:62px;right:0;top:0;bottom:0;display:grid;grid-template-columns:320px 1fr;overflow:hidden}
+.sect{display:none}.sect.on{display:contents}
+
+/* SIDEBAR */
+.sb{background:var(--bg1);border-right:1px solid var(--b);display:flex;flex-direction:column;overflow:hidden}
+.sbh{padding:14px 14px 10px;display:flex;align-items:center;justify-content:space-between;flex-shrink:0;border-bottom:1px solid var(--b)}
+.sbt{font-size:18px;font-weight:800;letter-spacing:-.4px}
+.sbacts{display:flex;gap:3px}
+.ib{width:32px;height:32px;border-radius:9px;display:flex;align-items:center;justify-content:center;font-size:16px;color:var(--t2);transition:.16s;cursor:pointer;border:none;background:none}
+.ib:hover{background:var(--gl2);color:var(--t)}.ib.pr{background:var(--p);color:#fff;box-shadow:0 2px 8px var(--pg)}.ib.pr:hover{background:#0284c7}
+.sbsrch{padding:9px 12px;flex-shrink:0}
+.sw{display:flex;align-items:center;gap:7px;background:var(--bg3);border:1px solid var(--b);border-radius:10px;padding:8px 11px}
+.sw input{flex:1;background:none;border:none;outline:none;font-size:13.5px;color:var(--t)}.sw input::placeholder{color:var(--t3)}
+.sbtabs{display:flex;border-bottom:1px solid var(--b);padding:0 12px;flex-shrink:0}
+.sbtab{flex:1;padding:9px 6px;font-size:11px;font-weight:700;color:var(--t3);border-bottom:2px solid transparent;cursor:pointer;transition:.16s;text-align:center;text-transform:uppercase;letter-spacing:.06em}
+.sbtab.on{color:var(--p);border-bottom-color:var(--p)}
+.lst{flex:1;overflow-y:auto}
+.li{display:flex;align-items:center;gap:11px;padding:10px 13px;cursor:pointer;transition:.12s;position:relative;border-bottom:1px solid var(--b)}
+.li:hover{background:var(--gl)}.li.on{background:var(--gl2)}
+.li.on::before{content:'';position:absolute;left:0;top:5px;bottom:5px;width:3px;background:var(--p);border-radius:0 3px 3px 0}
+.onring{position:relative;flex-shrink:0}.ondot{position:absolute;bottom:-1px;right:-1px;width:11px;height:11px;border-radius:50%;background:var(--green);border:2px solid var(--bg1)}
+.lib{flex:1;min-width:0}
+.lir1{display:flex;justify-content:space-between;align-items:center;margin-bottom:2px}
+.linm{font-size:14px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.litm{font-size:11px;color:var(--t3);flex-shrink:0;font-family:"DM Mono",monospace}
+.lir2{display:flex;justify-content:space-between;align-items:center}
+.lipv{font-size:12.5px;color:var(--t2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:1}
+.bdg{background:var(--p);color:#fff;border-radius:20px;min-width:18px;height:18px;font-size:10px;font-weight:700;display:flex;align-items:center;justify-content:center;padding:0 4px;flex-shrink:0;margin-left:5px}
+.emst{padding:44px 18px;text-align:center;color:var(--t3)}.emst .ei{font-size:40px;margin-bottom:9px}.emst p{font-size:13px;line-height:1.6}
+
+/* MAIN */
+.main{display:flex;flex-direction:column;overflow:hidden;position:relative;background:var(--bg)}
+.main::before{content:'';position:absolute;inset:0;pointer-events:none;z-index:0;background-image:radial-gradient(circle at 1px 1px,var(--b) 1px,transparent 0);background-size:26px 26px;opacity:.5}
+
+/* HEADER */
+.mhd{display:flex;align-items:center;gap:11px;padding:12px 18px;background:var(--bg1);border-bottom:1px solid var(--b);flex-shrink:0;position:relative;z-index:2}
+.mhnm{font-size:15px;font-weight:700;letter-spacing:-.2px}
+.mhsb{font-size:12px;color:var(--t3);margin-top:1px}
+.mhacts{display:flex;gap:2px;margin-left:auto}
+.back-mb{display:none}
+
+/* MESSAGES */
+.msgs{flex:1;overflow-y:auto;padding:12px 52px;display:flex;flex-direction:column;gap:1px;position:relative;z-index:1}
+.dchip{text-align:center;margin:10px 0 4px}.dchip span{background:var(--bg1);color:var(--t3);font-size:11px;font-weight:600;font-family:"DM Mono",monospace;padding:4px 11px;border-radius:20px;border:1px solid var(--b)}
+.brow{display:flex;align-items:flex-end;gap:6px;margin-bottom:1px}.brow.me{flex-direction:row-reverse}
+.bav{width:24px;height:24px;border-radius:7px;flex-shrink:0;object-fit:cover;margin-bottom:2px}
+.bav-ph{width:24px;height:24px;border-radius:7px;flex-shrink:0;display:flex;align-items:center;justify-content:center;font-size:9px;font-weight:800;color:#fff;margin-bottom:2px}
+.bub{max-width:62%;border-radius:15px;padding:8px 12px 6px;position:relative;cursor:pointer;animation:bpop .2s var(--spring) both;word-wrap:break-word;box-shadow:var(--ss)}
+@keyframes bpop{from{opacity:0;transform:scale(.9) translateY(8px)}to{opacity:1;transform:none}}
+.bub.me{background:var(--bme);border-bottom-right-radius:3px;border:1px solid rgba(14,165,233,.2)}
+.bub.them{background:var(--bthem);border:1px solid var(--b);border-bottom-left-radius:3px}
+.bsndr{font-size:11px;font-weight:700;margin-bottom:3px}
+.btxt{font-size:14px;line-height:1.55;white-space:pre-wrap}
+.bub.me .btxt{color:rgba(255,255,255,.93)}.bub.them .btxt{color:var(--t)}
+.bemoji{font-size:50px;line-height:1.2;display:block;padding:4px 0}
+.bimg{max-width:100%;border-radius:9px;display:block;margin-bottom:4px;cursor:pointer;max-height:260px;object-fit:cover;width:100%}
+.bfile{display:flex;align-items:center;gap:9px;background:rgba(255,255,255,.08);border-radius:9px;padding:9px 11px;margin-bottom:4px}
+.bub.them .bfile{background:var(--bg3)}
+.bfic{font-size:22px;flex-shrink:0}
+.bfnm{font-size:13px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.bfsz{font-size:10.5px;color:var(--t3);margin-top:1px}
+.bub.me .bfsz{color:rgba(255,255,255,.4)}
+.breply{border-left:3px solid rgba(255,255,255,.4);border-radius:3px;padding:5px 8px;margin-bottom:5px;background:rgba(255,255,255,.08);cursor:pointer}
+.bub.them .breply{border-left-color:var(--p);background:var(--bg3)}
+.breplynm{font-size:11px;font-weight:700;color:rgba(255,255,255,.75)}.bub.them .breplynm{color:var(--p)}
+.brepltx{font-size:11.5px;color:rgba(255,255,255,.5);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.bub.them .brepltx{color:var(--t2)}
+.bmeta{display:flex;align-items:center;justify-content:flex-end;gap:3px;margin-top:3px}
+.btm{font-size:10px;font-family:"DM Mono",monospace;opacity:.5}.btick{font-size:11px;opacity:.7}.btick.rd{color:#7dd3fc;opacity:1}
+.breacts{display:flex;gap:3px;flex-wrap:wrap;margin-top:4px}
+.breact{background:var(--bg3);border:1px solid var(--b);border-radius:20px;padding:2px 7px;font-size:12px;cursor:pointer;transition:.12s;display:flex;align-items:center;gap:2px}
+.breact:hover,.breact.my{border-color:var(--p);background:var(--pg2)}.breact-n{font-size:10px;color:var(--t2)}
+.bfwd{font-size:11px;color:rgba(255,255,255,.4);display:flex;align-items:center;gap:3px;margin-bottom:3px}
+.bub.them .bfwd{color:var(--t3)}
+
+/* VOICE MSG */
+.bvoice{display:flex;align-items:center;gap:8px;padding:2px 0;min-width:200px}
+.vplay{width:32px;height:32px;border-radius:50%;background:rgba(255,255,255,.18);color:#fff;display:flex;align-items:center;justify-content:center;font-size:14px;cursor:pointer;flex-shrink:0;transition:.15s;border:none}
+.bub.them .vplay{background:var(--p)}.vplay:hover{transform:scale(1.1)}
+.vwv{display:flex;align-items:center;gap:1.5px;flex:1;height:28px;cursor:pointer}
+.vb{width:3px;border-radius:2px;background:rgba(255,255,255,.28);flex-shrink:0}
+.bub.them .vb{background:rgba(14,165,233,.35)}
+.vb.played{background:rgba(255,255,255,.85)}.bub.them .vb.played{background:var(--p)}
+.vdur{font-size:11px;font-family:"DM Mono",monospace;opacity:.55;white-space:nowrap;min-width:32px;text-align:right}
+
+/* POLL */
+.bpoll{min-width:240px}
+.bpoll-q{font-size:14px;font-weight:700;margin-bottom:10px}
+.bub.me .bpoll-q{color:rgba(255,255,255,.93)}
+.bpoll-opt{margin-bottom:7px;cursor:pointer}
+.bpoll-bar{height:34px;border-radius:8px;background:rgba(255,255,255,.08);border:1px solid rgba(255,255,255,.12);position:relative;overflow:hidden;display:flex;align-items:center;padding:0 10px;transition:.3s}
+.bub.them .bpoll-bar{background:var(--bg3);border-color:var(--b)}
+.bpoll-opt.voted .bpoll-bar{border-color:var(--p)}
+.bpoll-fill{position:absolute;left:0;top:0;bottom:0;background:var(--pg2);transition:width .4s var(--ease)}
+.bpoll-lbl{position:relative;z-index:1;font-size:13px;font-weight:600;flex:1}
+.bub.me .bpoll-lbl{color:rgba(255,255,255,.9)}
+.bpoll-pct{position:relative;z-index:1;font-size:11px;font-family:"DM Mono",monospace;color:var(--p)}
+
+/* REPORT */
+.brpt{min-width:270px;overflow-x:auto}
+.brpt-title{font-size:12px;font-weight:700;margin-bottom:5px;color:rgba(255,255,255,.6)}
+.bub.them .brpt-title{color:var(--t2)}
+.brpt table{width:100%;border-collapse:collapse;font-size:11px;font-family:"DM Mono",monospace}
+.brpt th{color:var(--p);font-size:9px;text-transform:uppercase;padding:5px 6px;border-bottom:1px solid var(--b);text-align:left;white-space:nowrap}
+.brpt td{padding:5px 6px;border-bottom:1px solid var(--b);white-space:nowrap}
+.brpt tr:last-child td{border-bottom:none}
+.brpt-sum{display:grid;grid-template-columns:1fr 1fr 1fr;gap:5px;margin-top:7px}
+.brpt-sum-item .sl{font-size:9px;opacity:.5;font-family:"DM Mono",monospace;text-align:center}
+.brpt-sum-item .sv{font-size:12px;font-weight:700;font-family:"DM Mono",monospace;text-align:center}
+
+/* TYPING */
+.typrow{padding:3px 52px 5px;display:none;position:relative;z-index:1}.typrow.on{display:flex;align-items:center;gap:6px}
+.typbub{display:inline-flex;align-items:center;gap:3px;background:var(--bthem);border:1px solid var(--b);border-radius:15px;border-bottom-left-radius:3px;padding:8px 12px;box-shadow:var(--ss)}
+.td{width:6px;height:6px;border-radius:50%;background:var(--t3);animation:tda .9s infinite ease-in-out}
+.td:nth-child(2){animation-delay:.15s}.td:nth-child(3){animation-delay:.3s}
+@keyframes tda{0%,60%,100%{transform:translateY(0);opacity:.4}30%{transform:translateY(-4px);opacity:1}}
+
+/* REPLY BAR */
+.rplyb{display:none;align-items:center;gap:9px;padding:7px 15px;background:var(--bg1);border-top:1px solid var(--b);flex-shrink:0}.rplyb.on{display:flex}
+.rbln{width:3px;height:32px;border-radius:3px;background:var(--p);flex-shrink:0}
+.rbinf{flex:1;min-width:0}.rbnm{font-size:11.5px;font-weight:700;color:var(--p)}.rbtx{font-size:12px;color:var(--t2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.rbx{width:26px;height:26px;border-radius:7px;font-size:15px;color:var(--t3);display:flex;align-items:center;justify-content:center}.rbx:hover{background:var(--bg4)}
+
+/* INPUT AREA */
+.inparea{flex-shrink:0;padding:9px 13px;background:var(--bg1);border-top:1px solid var(--b);position:relative;z-index:2}
+.emtray{position:absolute;bottom:calc(100% + 5px);left:8px;right:8px;background:var(--bg1);border:1px solid var(--b2);border-radius:14px;padding:12px;display:none;flex-wrap:wrap;gap:4px;max-height:200px;overflow-y:auto;box-shadow:var(--sh);z-index:20}
+.emtray.on{display:flex}
+.em{font-size:22px;cursor:pointer;padding:3px;border-radius:7px;transition:.12s;line-height:1}
+.em:hover{background:var(--gl2);transform:scale(1.22)}
+/* Attach tray - fixed position so it never gets cut off */
+.atmenu{position:fixed;bottom:70px;left:8px;right:8px;background:var(--bg1);border:1px solid var(--b2);border-radius:14px;padding:12px;display:none;grid-template-columns:repeat(4,1fr);gap:8px;box-shadow:var(--sh);z-index:500}
+.atmenu.on{display:grid}
+.amit{display:flex;flex-direction:column;align-items:center;gap:5px;padding:12px 6px;border-radius:11px;border:1px solid var(--b);background:var(--bg3);cursor:pointer;font-size:11px;font-weight:700;color:var(--t2);transition:.17s;text-align:center}
+.amit:hover{background:var(--bg4);color:var(--t);transform:translateY(-2px)}
+.amic{width:40px;height:40px;border-radius:12px;display:flex;align-items:center;justify-content:center;font-size:20px}
+.inprow{display:flex;align-items:flex-end;gap:7px}
+.inpic{width:38px;height:38px;border-radius:11px;display:flex;align-items:center;justify-content:center;font-size:19px;color:var(--t2);transition:.15s;flex-shrink:0;cursor:pointer;border:none;background:none}
+.inpic:hover,.inpic.on{color:var(--p)}
+.chatin{flex:1;background:var(--bg2);border:1px solid var(--b);border-radius:13px;padding:9px 13px;font-size:14.5px;outline:none;resize:none;min-height:38px;max-height:110px;line-height:1.5;transition:border-color .2s;color:var(--t)}.chatin:focus{border-color:var(--p)}.chatin::placeholder{color:var(--t3)}
+.sndbtn{width:38px;height:38px;border-radius:11px;background:var(--p);color:#fff;flex-shrink:0;display:flex;align-items:center;justify-content:center;font-size:17px;transition:.18s;box-shadow:0 2px 10px var(--pg);border:none;cursor:pointer}
+.sndbtn:hover{transform:scale(1.07)}
+/* MIC HOLD BUTTON */
+.micbtn{width:38px;height:38px;border-radius:11px;background:var(--ig);color:var(--green);flex-shrink:0;display:flex;align-items:center;justify-content:center;font-size:19px;transition:.18s;user-select:none;-webkit-user-select:none;touch-action:none;border:none;cursor:pointer}
+.micbtn.rec{background:rgba(244,63,94,.2);color:var(--red);animation:mpulse .8s infinite}
+@keyframes mpulse{0%,100%{box-shadow:0 0 0 0 rgba(244,63,94,.4)}50%{box-shadow:0 0 0 8px rgba(244,63,94,0)}}
+/* RECORDING BAR */
+.recbar{display:none;align-items:center;gap:8px;flex:1;background:var(--bg2);border:1px solid var(--b);border-radius:13px;padding:8px 12px}.recbar.on{display:flex}
+.rdot{width:8px;height:8px;border-radius:50%;background:var(--red);animation:bl 1s infinite;flex-shrink:0}
+@keyframes bl{0%,100%{opacity:1}50%{opacity:0}}
+.rtm{font-size:13px;font-family:"DM Mono",monospace;color:var(--red);min-width:30px}
+.rwvs{display:flex;align-items:center;gap:2px;flex:1}
+.rw{width:2.5px;border-radius:2px;background:var(--p);animation:rwv .5s ease-in-out infinite alternate;flex-shrink:0;height:60%}
+.rw:nth-child(odd){animation-delay:.1s}
+@keyframes rwv{from{height:20%}to{height:90%}}
+
+/* CALL SCREEN */
+.callscr{position:fixed;inset:0;background:linear-gradient(160deg,#071022,#0d1f3c,#071022);z-index:8000;display:none;flex-direction:column;align-items:center;justify-content:center;overflow:hidden}
+.callscr.on{display:flex}
+.cs-bg{position:absolute;inset:0;overflow:hidden;pointer-events:none}
+.cs-blob{position:absolute;border-radius:50%;filter:blur(80px);opacity:.15;animation:blob 8s infinite alternate}
+.cs-blob:nth-child(1){width:350px;height:350px;background:var(--p);top:-80px;left:-80px}
+.cs-blob:nth-child(2){width:300px;height:300px;background:var(--purple);bottom:-60px;right:-60px;animation-delay:2s}
+@keyframes blob{from{transform:translate(0,0) scale(1)}to{transform:translate(20px,15px) scale(1.1)}}
+.cs-av-wrap{position:relative;margin-bottom:16px;z-index:1}
+.cs-av-ring{width:110px;height:110px;border-radius:50%;display:flex;align-items:center;justify-content:center;position:relative}
+.cs-av-ring.ringing::before,.cs-av-ring.ringing::after{content:'';position:absolute;border-radius:50%;border:2px solid rgba(14,165,233,.4);animation:ring 1.8s infinite}
+.cs-av-ring.ringing::before{width:140px;height:140px;animation-delay:.3s}
+.cs-av-ring.ringing::after{width:170px;height:170px;animation-delay:.6s}
+@keyframes ring{0%{transform:scale(.85);opacity:1}100%{transform:scale(1.2);opacity:0}}
+.cs-av-inner{width:100px;height:100px;border-radius:50%;object-fit:cover;border:3px solid rgba(255,255,255,.3)}
+.cs-av-ph{width:100px;height:100px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:38px;font-weight:800;color:#fff;border:3px solid rgba(255,255,255,.3)}
+.cs-name{font-size:26px;font-weight:800;color:#fff;letter-spacing:-.5px;z-index:1}
+.cs-status{font-size:14px;color:rgba(255,255,255,.6);margin-top:6px;margin-bottom:8px;z-index:1;font-family:"DM Mono",monospace}
+.cs-timer{font-size:18px;font-family:"DM Mono",monospace;color:rgba(255,255,255,.8);margin-bottom:28px;z-index:1;letter-spacing:.05em;display:none}
+.cs-vids{display:none;gap:12px;margin-bottom:18px;z-index:1}
+.cs-vids.on{display:flex}
+.cs-vid-box{width:90px;height:130px;border-radius:14px;background:rgba(0,0,0,.4);border:1px solid rgba(255,255,255,.12);position:relative;overflow:hidden;display:flex;align-items:center;justify-content:center;font-size:28px}
+.cs-vid-box video{position:absolute;inset:0;width:100%;height:100%;object-fit:cover}
+.cs-vid-lbl{position:absolute;bottom:5px;left:0;right:0;text-align:center;font-size:10px;color:rgba(255,255,255,.7);font-weight:600;z-index:1}
+.cs-btns{display:flex;gap:18px;z-index:1;flex-wrap:wrap;justify-content:center;padding:0 20px}
+.cs-btn-wrap{display:flex;flex-direction:column;align-items:center;gap:5px}
+.csbtn{width:58px;height:58px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:24px;border:none;cursor:pointer;transition:.2s}
+.csbtn:hover{transform:scale(1.08)}
+.csbtn.end{background:var(--red);box-shadow:0 4px 20px rgba(244,63,94,.5)}
+.csbtn.ctl{background:rgba(255,255,255,.15)}.csbtn.muted{background:rgba(244,63,94,.3)}
+.cs-btn-lbl{font-size:10px;color:rgba(255,255,255,.5);font-weight:600}
+
+/* NOTIFICATION PANEL */
+#notifBd{position:fixed;inset:0;background:rgba(0,0,0,.25);z-index:3999;display:none}
+.notifpanel{position:fixed;top:0;right:-420px;width:380px;bottom:0;background:var(--bg1);border-left:1px solid var(--b2);z-index:4000;display:flex;flex-direction:column;transition:right .3s var(--ease);box-shadow:var(--sh)}
+.notifpanel.on{right:0}
+.nph{padding:16px 16px 12px;display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid var(--b);flex-shrink:0}
+.nph h3{font-size:17px;font-weight:700}
+.nphacts{display:flex;gap:6px}
+.npbody{flex:1;overflow-y:auto;padding:10px}
+.nitem{display:flex;align-items:flex-start;gap:10px;padding:11px 12px;border-radius:12px;cursor:pointer;transition:.13s;border-bottom:1px solid var(--b);margin-bottom:3px}
+.nitem:hover{background:var(--gl2)}.nitem.unread{background:var(--pg2)}
+.nic{width:38px;height:38px;border-radius:12px;display:flex;align-items:center;justify-content:center;font-size:18px;flex-shrink:0}
+.nib{flex:1;min-width:0}.nit{font-size:13.5px;font-weight:600;margin-bottom:2px}.nixb{font-size:12px;color:var(--t2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.nitm{font-size:10.5px;color:var(--t3);font-family:"DM Mono",monospace;margin-top:2px}
+.ndot{width:8px;height:8px;border-radius:50%;background:var(--p);flex-shrink:0;margin-top:5px}
+
+/* INFO PANEL */
+.infopanel{position:absolute;right:-100%;top:0;bottom:0;width:300px;background:var(--bg1);border-left:1px solid var(--b);display:flex;flex-direction:column;z-index:50;transition:right .26s var(--ease);box-shadow:var(--sh)}
+.infopanel.on{right:0}
+.iphead{padding:13px 15px;display:flex;align-items:center;gap:8px;border-bottom:1px solid var(--b);flex-shrink:0}
+.iphead h3{font-size:16px;font-weight:700;flex:1}
+.ipbody{flex:1;overflow-y:auto;padding:14px 15px}
+.profnm{text-align:center;font-size:18px;font-weight:700}.profsb{text-align:center;font-size:12px;color:var(--t3)}
+.inforow{display:flex;align-items:flex-start;gap:10px;padding:11px 0;border-bottom:1px solid var(--b)}.inforow:last-child{border-bottom:none}
+.infoic{font-size:16px;width:19px;text-align:center;flex-shrink:0;margin-top:1px}
+.infolb{font-size:10px;color:var(--t3);font-weight:700;text-transform:uppercase;letter-spacing:.07em;margin-bottom:2px}.infovl{font-size:13px;color:var(--t)}
+.memit{display:flex;align-items:center;gap:9px;padding:9px 0;border-bottom:1px solid var(--b);cursor:pointer}.memit:last-child{border-bottom:none}
+.memnm{font-size:13px;font-weight:600}.memrl{font-size:11px;color:var(--t3)}
+.membdg{margin-left:auto;background:var(--pg2);color:var(--p);border:1px solid rgba(14,165,233,.3);border-radius:20px;padding:2px 7px;font-size:10px;font-weight:700}
+
+/* CTX MENU */
+.ctx{position:fixed;background:var(--bg1);border:1px solid var(--b2);border-radius:12px;box-shadow:var(--sh);z-index:6000;overflow:hidden;min-width:160px;animation:ctxIn .13s var(--ease) both}
+@keyframes ctxIn{from{opacity:0;transform:scale(.92)}to{opacity:1;transform:none}}
+.ctxit{display:flex;align-items:center;gap:8px;padding:10px 14px;cursor:pointer;font-size:13px;transition:.1s;color:var(--t);border:none;background:none;width:100%;text-align:left}
+.ctxit:hover{background:var(--gl2)}.ctxit.red{color:var(--red)}.ctxic{font-size:15px;width:17px;text-align:center}
+.rppick{position:fixed;background:var(--bg1);border:1px solid var(--b2);border-radius:40px;padding:7px 11px;display:flex;gap:5px;box-shadow:var(--sh);z-index:6001;animation:bpop .17s var(--spring) both}
+.rpem{font-size:22px;cursor:pointer;padding:3px;border-radius:50%;transition:.12s}.rpem:hover{transform:scale(1.4)}
+
+/* MODALS */
+.ov{position:fixed;inset:0;background:rgba(0,0,0,.6);backdrop-filter:blur(7px);z-index:5000;display:none;align-items:flex-start;justify-content:center;padding:16px;overflow-y:auto}
+.ov.on{display:flex}
+.modal{background:var(--bg1);border:1px solid var(--b2);border-radius:20px;padding:22px;width:100%;max-width:440px;max-height:85vh;overflow-y:auto;box-shadow:var(--sh);animation:mIn .27s var(--spring) both;margin:auto}
+@keyframes mIn{from{opacity:0;transform:scale(.88) translateY(22px)}to{opacity:1;transform:none}}
+.mhd2{display:flex;align-items:center;justify-content:space-between;margin-bottom:16px}
+.mttl{font-size:18px;font-weight:800;letter-spacing:-.3px}
+.mx{width:29px;height:29px;border-radius:9px;background:var(--bg4);color:var(--t2);font-size:14px;display:flex;align-items:center;justify-content:center;transition:.14s;cursor:pointer;border:none}.mx:hover{background:var(--red);color:#fff}
+.macts{display:flex;gap:9px;margin-top:16px}
+.macts button{flex:1;padding:11px;border-radius:10px;border:none;cursor:pointer;font-size:13.5px;font-weight:700;transition:.18s}
+.btnc{background:var(--bg3);color:var(--t2)}.btnc:hover{background:var(--bg4)}
+.btnp{background:var(--p);color:#fff;box-shadow:0 3px 12px var(--pg)}.btnp:hover{transform:translateY(-1px)}
+.tsw{display:flex;background:var(--bg3);border-radius:10px;padding:3px;gap:3px;margin-bottom:15px}
+.tswb{flex:1;padding:8px;border-radius:8px;border:none;cursor:pointer;font-size:13px;font-weight:700;color:var(--t3);background:transparent;transition:.18s}
+.tswb.inc.on{background:var(--ig);color:var(--green);border:1px solid rgba(34,197,94,.3)}
+.tswb.exp.on{background:var(--eg);color:var(--red);border:1px solid rgba(244,63,94,.3)}
+.amtw{position:relative}.amtpfx{position:absolute;left:11px;top:50%;transform:translateY(-50%);color:var(--t3);font-family:"DM Mono",monospace;font-weight:600;font-size:13.5px}
+.amtinp{padding-left:26px!important;font-size:17px!important;font-weight:700!important;font-family:"DM Mono",monospace!important}
+.picklst{max-height:260px;overflow-y:auto;display:flex;flex-direction:column;gap:3px;margin-top:9px}
+.pkit{display:flex;align-items:center;gap:9px;padding:8px 10px;border-radius:10px;cursor:pointer;transition:.12s}
+.pkit:hover{background:var(--gl2)}.pkit.sel{background:var(--pg2)}
+.pknm{font-size:13.5px;font-weight:600}.pksb{font-size:12px;color:var(--t2)}
+.pkchk{width:20px;height:20px;border-radius:50%;border:2px solid var(--b2);display:flex;align-items:center;justify-content:center;flex-shrink:0;margin-left:auto;transition:.14s}
+.pkit.sel .pkchk{background:var(--p);border-color:var(--p);color:#fff;font-size:11px}
+.chiprow{display:flex;flex-wrap:wrap;gap:5px;margin-bottom:10px}
+.chip{display:flex;align-items:center;gap:4px;background:var(--pg2);border:1px solid rgba(14,165,233,.3);color:var(--p);border-radius:20px;padding:3px 9px;font-size:12px;font-weight:700}
+.chip button{color:var(--p);font-size:12px;padding:0;display:flex;border:none;background:none;cursor:pointer}
+.poll-opts{display:flex;flex-direction:column;gap:8px;margin-bottom:12px}
+.poll-orow{display:flex;align-items:center;gap:7px}
+.poll-odel{color:var(--red);font-size:15px;cursor:pointer;flex-shrink:0;border:none;background:none}
+.exp-btn{display:flex;align-items:center;justify-content:center;gap:8px;width:100%;padding:12px;border-radius:11px;font-size:14px;font-weight:700;cursor:pointer;transition:.2s;border:1px solid var(--b)}
+.exp-btn:hover{transform:translateY(-1px)}
+.exp-btn.csv{background:var(--ig);color:var(--green);border-color:rgba(34,197,94,.3)}
+.exp-btn.pdf{background:var(--eg);color:var(--red);border-color:rgba(244,63,94,.3)}
+.exp-btn.chat{background:var(--pg2);color:var(--p);border-color:rgba(14,165,233,.3)}
+
+/* FINANCE */
+.finmain{flex:1;overflow-y:auto;padding:20px 24px 100px;display:flex;flex-direction:column;gap:18px;position:relative;z-index:1}
+.hcard{border-radius:20px;padding:24px;position:relative;overflow:hidden;border:1px solid rgba(14,165,233,.18);background:linear-gradient(140deg,rgba(14,165,233,.07),rgba(139,92,246,.05))}
+.hcard::before{content:'';position:absolute;top:-60px;right:-60px;width:200px;height:200px;background:radial-gradient(circle,rgba(14,165,233,.12),transparent 70%)}
+.hlbl{font-size:11px;font-weight:700;color:var(--t2);text-transform:uppercase;letter-spacing:.09em;font-family:"DM Mono",monospace}
+.hbal{font-size:44px;font-weight:800;letter-spacing:-2px;font-family:"DM Mono",monospace;margin:7px 0 18px;line-height:1}
+.hbal.pos{color:var(--green)}.hbal.neg{color:var(--red)}
+.hpills{display:flex;gap:9px}
+.hp{flex:1;background:rgba(255,255,255,.04);border:1px solid var(--b);border-radius:12px;padding:10px 12px}
+[data-t=light] .hp{background:rgba(0,0,0,.03)}
+.hplb{font-size:10px;font-weight:700;color:var(--t2);text-transform:uppercase;letter-spacing:.08em;font-family:"DM Mono",monospace}
+.hpval{font-size:16px;font-weight:700;font-family:"DM Mono",monospace;margin-top:2px}
+.hp.inc .hpval{color:var(--green)}.hp.exp .hpval{color:var(--red)}.hp.sav .hpval{color:var(--amber)}
+.qarow{display:grid;grid-template-columns:repeat(4,1fr);gap:9px}
+.qabtn{padding:12px 7px;border-radius:13px;border:1px solid var(--b);background:var(--bg1);cursor:pointer;transition:.17s;display:flex;flex-direction:column;align-items:center;gap:6px;font-size:11.5px;font-weight:700;color:var(--t2)}
+.qabtn:hover{transform:translateY(-2px);box-shadow:var(--ss);color:var(--t)}
+.qaic{width:42px;height:42px;border-radius:12px;display:flex;align-items:center;justify-content:center;font-size:20px}
+.chgrid{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+.chcard{background:var(--bg1);border:1px solid var(--b);border-radius:18px;padding:16px}
+.cht{font-size:11px;font-weight:700;color:var(--t2);text-transform:uppercase;letter-spacing:.07em;font-family:"DM Mono",monospace;margin-bottom:12px}
+.chc canvas{max-height:170px}
+.dleg{display:flex;flex-wrap:wrap;gap:6px;margin-top:9px}
+.dlitem{display:flex;align-items:center;gap:4px;font-size:11px;font-family:"DM Mono",monospace;color:var(--t2)}
+.dldt{width:6px;height:6px;border-radius:50%;flex-shrink:0}
+.secrow{display:flex;align-items:center;justify-content:space-between;margin-bottom:11px}
+.sectit{font-size:14.5px;font-weight:700}.secact{font-size:12px;color:var(--p);font-weight:600;cursor:pointer;font-family:"DM Mono",monospace}
+.secact:hover{text-decoration:underline}
+.txlst{display:flex;flex-direction:column;gap:7px}
+.txitem{background:var(--bg1);border:1px solid var(--b);border-radius:13px;padding:12px 14px;display:flex;align-items:center;gap:11px;transition:.14s;position:relative;overflow:hidden}
+.txitem::before{content:'';position:absolute;left:0;top:0;bottom:0;width:3px;border-radius:3px 0 0 3px}
+.txitem.inc::before{background:var(--green)}.txitem.exp::before{background:var(--red)}
+.txitem:hover{background:var(--bg2);border-color:var(--b2);transform:translateX(2px)}
+.txav{width:38px;height:38px;border-radius:11px;display:flex;align-items:center;justify-content:center;font-size:18px;flex-shrink:0}
+.txav.inc{background:var(--ig)}.txav.exp{background:var(--eg)}
+.txb{flex:1;min-width:0}.txnm{font-size:13.5px;font-weight:600}.txcat{font-size:11px;color:var(--t2);margin-top:2px;font-family:"DM Mono",monospace}
+.txr{text-align:right}.txamt{font-size:14px;font-weight:700;font-family:"DM Mono",monospace}
+.txamt.inc{color:var(--green)}.txamt.exp{color:var(--red)}.txdt{font-size:11px;color:var(--t3);margin-top:2px;font-family:"DM Mono",monospace}
+.txhov{position:absolute;right:0;top:0;bottom:0;background:linear-gradient(to left,var(--bg2) 50%,transparent);display:flex;align-items:center;gap:4px;padding:0 11px 0 26px;opacity:0;transition:.12s;pointer-events:none}
+.txitem:hover .txhov{opacity:1;pointer-events:all}
+.tabtn{width:26px;height:26px;border-radius:7px;font-size:12px;display:flex;align-items:center;justify-content:center;transition:.12s;cursor:pointer;border:none}
+.tabtn.ed{background:rgba(14,165,233,.14);color:var(--p)}.tabtn.dl{background:var(--eg);color:var(--red)}.tabtn:hover{transform:scale(1.1)}
+.budcard{background:var(--bg1);border:1px solid var(--b);border-radius:13px;padding:13px;margin-bottom:8px}
+.budhd{display:flex;justify-content:space-between;align-items:center;margin-bottom:8px}
+.budnm{font-size:13px;font-weight:600}.budamts{font-size:11px;font-family:"DM Mono",monospace;color:var(--t2)}
+.budbar{height:6px;background:var(--bg4);border-radius:6px;overflow:hidden}
+.budfill{height:100%;border-radius:6px;transition:width .5s var(--ease)}
+.budfill.ok{background:var(--green)}.budfill.warn{background:var(--amber)}.budfill.over{background:var(--red)}
+.budpct{font-size:10px;font-family:"DM Mono",monospace;color:var(--t3);text-align:right;margin-top:4px}
+
+/* MOBILE FINANCE FULLSCREEN */
+#mobFinPage{display:none;position:fixed;inset:0;bottom:56px;z-index:15;background:var(--bg);flex-direction:column;overflow:hidden}
+#mobFinPage.on{display:flex}
+#mobFinBody{flex:1;overflow-y:auto;-webkit-overflow-scrolling:touch;padding:14px 14px 80px}
+.mob-fin-head{display:flex;align-items:center;justify-content:space-between;padding:14px 16px;background:var(--bg1);border-bottom:1px solid var(--b);flex-shrink:0}
+.mob-fin-tabs{display:flex;border-bottom:1px solid var(--b);flex-shrink:0;background:var(--bg1)}
+.mftab{flex:1;padding:10px;font-size:11px;font-weight:700;color:var(--t3);border-bottom:2px solid transparent;cursor:pointer;text-align:center;text-transform:uppercase;letter-spacing:.06em;transition:.15s;border:none;background:none}
+.mftab.on{color:var(--p);border-bottom-color:var(--p)}
+
+/* LIGHTBOX + TOAST */
+.lb{position:fixed;inset:0;background:rgba(0,0,0,.93);z-index:9000;display:none;align-items:center;justify-content:center}.lb.on{display:flex}
+.lb img{max-width:90vw;max-height:85vh;border-radius:9px;object-fit:contain}
+.lbx{position:absolute;top:16px;right:16px;background:rgba(255,255,255,.12);border:none;color:#fff;width:36px;height:36px;border-radius:50%;font-size:17px;cursor:pointer;display:flex;align-items:center;justify-content:center}
+@keyframes spin{from{transform:rotate(0deg)}to{transform:rotate(360deg)}}
+.toast{position:fixed;bottom:22px;left:50%;transform:translateX(-50%) translateY(12px);background:var(--bg1);border:1px solid var(--b2);border-radius:11px;padding:9px 18px;font-size:13px;font-weight:600;opacity:0;transition:.27s;pointer-events:none;white-space:nowrap;box-shadow:var(--sh);z-index:9999}
+.toast.on{opacity:1;transform:translateX(-50%) translateY(0)}.toast.ok{border-left:3px solid var(--green)}.toast.err{border-left:3px solid var(--red)}.toast.info{border-left:3px solid var(--p)}
+
+/* MOBILE */
+@media(max-width:768px){
+  .dock{width:100%;height:56px;flex-direction:row;bottom:0;top:auto;border-right:none;border-top:1px solid var(--b);padding:6px 2px;justify-content:space-around;gap:0}
+  .dlogo{display:none}.dsp{display:none}
+  .dbtn{width:44px;height:44px;border-radius:11px}
+  .dav,.dav-ph{width:30px;height:30px;border-radius:9px}
+  .content{left:0;bottom:56px;top:0;grid-template-columns:100%}
+  .sb{position:absolute;inset:0;z-index:20;transition:transform .27s var(--ease)}
+  .sb.hide{transform:translateX(-100%)}
+  .main{position:absolute;inset:0}
+  .back-mb{display:flex!important}
+  .msgs{padding:10px 12px}.typrow{padding:3px 12px 5px}
+  .bub{max-width:85%}
+  .atmenu{left:8px;right:8px;bottom:65px;grid-template-columns:repeat(3,1fr)}
+  .infopanel{width:100%}
+  .finmain{padding:14px 12px 100px}
+  .chgrid{grid-template-columns:1fr}
+  .qarow{grid-template-columns:repeat(2,1fr)}
+  .notifpanel{width:100%;right:-100%}.notifpanel.on{right:0}
+  .cs-btns{gap:14px}
+  .msgs{padding:10px 10px}
+}
+</style>
+<link rel="manifest" id="pwaManifest">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="PULSE">
+</head>
+<body>
+<!-- AUTH -->
+<div id="authWall">
+ <div class="ac">
+  <div class="abrand"><div class="abrand-ic">⚡</div><h1>PULSE</h1><p>Chat · Finance · All in one</p></div>
+   <div id="authLoading" style="text-align:center;padding:30px 0;display:none">
+    <div style="width:40px;height:40px;border:3px solid var(--b2);border-top-color:var(--p);border-radius:50%;animation:spin .7s linear infinite;margin:0 auto 12px"></div>
+    <div style="font-size:13px;color:var(--t2)">Signing you in…</div>
+   </div>
+  <div class="abox">
+   <div class="seg"><button id="asl" class="on" onclick="authTab('l')">Sign In</button><button id="asr" onclick="authTab('r')">Register</button></div>
+   <div id="aerr" class="aerr"></div>
+   <div id="fpL" class="fp on">
+    <!-- Google Sign In -->
+    <button onclick="doGoogleSignIn()" style="width:100%;padding:12px;border-radius:11px;background:#fff;color:#333;font-size:14px;font-weight:700;border:1.5px solid #e2e8f0;display:flex;align-items:center;justify-content:center;gap:10px;cursor:pointer;margin-bottom:14px;transition:.2s;box-shadow:0 1px 6px rgba(0,0,0,.08)" onmouseover="this.style.boxShadow='0 3px 12px rgba(0,0,0,.15)'" onmouseout="this.style.boxShadow='0 1px 6px rgba(0,0,0,.08)'">
+     <svg width="18" height="18" viewBox="0 0 48 48"><path fill="#EA4335" d="M24 9.5c3.54 0 6.71 1.22 9.21 3.6l6.85-6.85C35.9 2.38 30.47 0 24 0 14.62 0 6.51 5.38 2.56 13.22l7.98 6.19C12.43 13.08 17.74 9.5 24 9.5z"/><path fill="#4285F4" d="M46.98 24.55c0-1.57-.15-3.09-.38-4.55H24v9.02h12.94c-.58 2.96-2.26 5.48-4.78 7.18l7.73 6c4.51-4.18 7.09-10.36 7.09-17.65z"/><path fill="#FBBC05" d="M10.53 28.59c-.48-1.45-.76-2.99-.76-4.59s.27-3.14.76-4.59l-7.98-6.19C.92 16.46 0 20.12 0 24c0 3.88.92 7.54 2.56 10.78l7.97-6.19z"/><path fill="#34A853" d="M24 48c6.48 0 11.93-2.13 15.89-5.81l-7.73-6c-2.18 1.48-4.97 2.36-8.16 2.36-6.26 0-11.57-3.59-13.46-8.91l-7.98 6.19C6.51 42.62 14.62 48 24 48z"/></svg>
+     Continue with Google
+    </button>
+    <div style="display:flex;align-items:center;gap:10px;margin-bottom:14px"><div style="flex:1;height:1px;background:var(--b)"></div><span style="font-size:11px;color:var(--t3);font-weight:600">OR</span><div style="flex:1;height:1px;background:var(--b)"></div></div>
+    <div class="fg"><label class="fl">Username</label><input class="fi" id="lU" placeholder="username" autocomplete="username"></div>
+    <div class="fg"><label class="fl">Password</label><input class="fi" id="lP" type="password" placeholder="••••••••"></div>
+    <button class="cbtn" onclick="doLogin()">Sign In →</button>
+    <div class="gor">or</div>
+    <button class="gbtn" onclick="doGoogleSignIn()">
+      <svg viewBox="0 0 48 48"><path fill="#EA4335" d="M24 9.5c3.54 0 6.71 1.22 9.21 3.6l6.85-6.85C35.9 2.38 30.47 0 24 0 14.62 0 6.51 5.33 2.56 13.22l7.98 6.19C12.43 13.08 17.74 9.5 24 9.5z"/><path fill="#4285F4" d="M46.98 24.55c0-1.57-.15-3.09-.38-4.55H24v9.02h12.94c-.58 2.96-2.26 5.48-4.78 7.18l7.73 6c4.51-4.18 7.09-10.36 7.09-17.65z"/><path fill="#FBBC05" d="M10.53 28.59c-.48-1.45-.76-2.99-.76-4.59s.27-3.14.76-4.59l-7.98-6.19C.92 16.46 0 20.12 0 24c0 3.88.92 7.54 2.56 10.78l7.97-6.19z"/><path fill="#34A853" d="M24 48c6.48 0 11.93-2.13 15.89-5.81l-7.73-6c-2.18 1.48-4.97 2.31-8.16 2.31-6.26 0-11.57-3.59-13.46-8.91l-7.98 6.19C6.51 42.67 14.62 48 24 48z"/><path fill="none" d="M0 0h48v48H0z"/></svg>
+      Continue with Google
+    </button>
+    <div class="aalt">New? <a onclick="authTab('r')">Create account</a></div>
+   </div>
+   <div id="fpR" class="fp">
+    <div class="avup" id="regAvWrap" onclick="document.getElementById('regAin').click()">
+     <img id="regAimg"><div class="aic">📷</div><div class="alb">Photo</div>
+     <input type="file" id="regAin" accept="image/*" style="display:none" onchange="prevAv(this)">
+    </div>
+    <div class="f2">
+     <div class="fg"><label class="fl">Full Name</label><input class="fi" id="rN" placeholder="Your Name"></div>
+     <div class="fg"><label class="fl">Username</label><input class="fi" id="rU" placeholder="username"></div>
+    </div>
+    <div class="fg"><label class="fl">About</label><input class="fi" id="rAb" placeholder="Available"></div>
+    <div class="fg"><label class="fl">Password</label><input class="fi" id="rP" type="password" placeholder="••••••••"></div>
+    <div class="fg"><label class="fl">Confirm</label><input class="fi" id="rP2" type="password" placeholder="••••••••"></div>
+    <button class="cbtn" onclick="doReg()">Create Account →</button>
+    <div style="display:flex;align-items:center;gap:10px;margin:12px 0"><div style="flex:1;height:1px;background:var(--b)"></div><span style="font-size:11px;color:var(--t3);font-weight:600">OR</span><div style="flex:1;height:1px;background:var(--b)"></div></div>
+    <button onclick="doGoogleSignIn()" style="width:100%;padding:12px;border-radius:11px;background:#fff;color:#333;font-size:14px;font-weight:700;border:1.5px solid #e2e8f0;display:flex;align-items:center;justify-content:center;gap:10px;cursor:pointer;transition:.2s;box-shadow:0 1px 6px rgba(0,0,0,.08)">
+     <svg width="18" height="18" viewBox="0 0 48 48"><path fill="#EA4335" d="M24 9.5c3.54 0 6.71 1.22 9.21 3.6l6.85-6.85C35.9 2.38 30.47 0 24 0 14.62 0 6.51 5.38 2.56 13.22l7.98 6.19C12.43 13.08 17.74 9.5 24 9.5z"/><path fill="#4285F4" d="M46.98 24.55c0-1.57-.15-3.09-.38-4.55H24v9.02h12.94c-.58 2.96-2.26 5.48-4.78 7.18l7.73 6c4.51-4.18 7.09-10.36 7.09-17.65z"/><path fill="#FBBC05" d="M10.53 28.59c-.48-1.45-.76-2.99-.76-4.59s.27-3.14.76-4.59l-7.98-6.19C.92 16.46 0 20.12 0 24c0 3.88.92 7.54 2.56 10.78l7.97-6.19z"/><path fill="#34A853" d="M24 48c6.48 0 11.93-2.13 15.89-5.81l-7.73-6c-2.18 1.48-4.97 2.36-8.16 2.36-6.26 0-11.57-3.59-13.46-8.91l-7.98 6.19C6.51 42.62 14.62 48 24 48z"/></svg>
+     Sign up with Google
+    </button>
+    <div class="aalt">Have account? <a onclick="authTab('l')">Sign in</a></div>
+   </div>
+  </div>
+ </div>
+</div>
+
+<!-- APP -->
+<div id="app">
+ <!-- DOCK -->
+ <div class="dock">
+  <div class="dlogo" title="PULSE">⚡</div>
+  <div id="fbStatus" title="Sync status" style="width:8px;height:8px;border-radius:50%;background:var(--t3);margin:2px auto;flex-shrink:0;transition:background .3s"></div>
+  <button class="dbtn on" data-sec="chat" onclick="setSec('chat')">💬</button>
+  <button class="dbtn" data-sec="fin" onclick="setSec('fin')">💰</button>
+  <button class="dbtn" id="notifBtn" onclick="toggleNotif()" style="position:relative">🔔<div class="nbadge" id="nbadge"></div></button>
+  <div class="dsp"></div>
+  <button class="dbtn" id="thBtn" onclick="cycleTheme()">🖥️</button>
+  <div id="dockAv" onclick="openMyProf()" style="cursor:pointer;flex-shrink:0;margin:4px 0"></div>
+ </div>
+
+ <div class="content">
+  <!-- CHAT SECTION -->
+  <div class="sect on" id="secChat">
+   <div class="sb" id="chatSB">
+    <div class="sbh"><div class="sbt">Messages</div><div class="sbacts"><button class="ib" onclick="openNewGroup()">👥</button><button class="ib pr" onclick="openNewChat()">✏️</button></div></div>
+    <div class="sbsrch"><div class="sw">🔍<input id="cSrch" placeholder="Search…" oninput="renderChatList()"></div></div>
+    <div class="sbtabs">
+     <div class="sbtab on" id="ctAll" onclick="setCTab('all')">All</div>
+     <div class="sbtab" id="ctUnread" onclick="setCTab('unread')">Unread</div>
+     <div class="sbtab" id="ctGroups" onclick="setCTab('groups')">Groups</div>
+    </div>
+    <div class="lst" id="chatList"></div>
+   </div>
+   <div class="main" id="chatMain">
+    <div id="noChat" style="flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:12px;color:var(--t3);text-align:center;padding:40px;position:relative;z-index:1">
+     <div style="width:72px;height:72px;border-radius:22px;background:var(--gl2);border:1px solid var(--b);display:flex;align-items:center;justify-content:center;font-size:32px">💬</div>
+     <div style="font-size:20px;font-weight:700;color:var(--t2)">PULSE</div>
+     <div style="font-size:13.5px;max-width:240px;line-height:1.65">Select a conversation or tap ✏️ to start chatting</div>
+    </div>
+    <div id="chatView" style="display:none;flex-direction:column;height:100%">
+     <div class="mhd">
+      <button class="back-mb ib" id="backMb" onclick="goBack()" style="display:none">←</button>
+      <div id="mhAv" onclick="openInfo()" style="cursor:pointer;flex-shrink:0"></div>
+      <div onclick="openInfo()" style="cursor:pointer;flex:1"><div class="mhnm" id="mhNm"></div><div class="mhsb" id="mhSb"></div></div>
+      <div class="mhacts">
+       <button class="ib" onclick="startCall('video')" title="Video Call">📹</button>
+       <button class="ib" onclick="startCall('audio')" title="Voice Call">📞</button>
+       <button class="ib" onclick="refreshChat()" title="Refresh">🔄</button>
+       <button class="ib" onclick="toggleMsgSrch()">🔍</button>
+       <button class="ib" id="muteBtn" onclick="toggleMute()">🔔</button>
+      </div>
+     </div>
+     <div id="msgSrchBar" style="display:none;padding:7px 13px;background:var(--bg1);border-bottom:1px solid var(--b)">
+      <div class="sw">🔍<input id="msgSrch" placeholder="Search messages…" oninput="renderMsgs()"></div>
+     </div>
+     <div class="msgs" id="msgs"></div>
+     <div class="typrow" id="typRow"><div class="typbub"><div class="td"></div><div class="td"></div><div class="td"></div></div><span id="typLbl" style="font-size:12px;color:var(--t3);margin-left:7px"></span></div>
+     <div class="rplyb" id="rplyB">
+      <div class="rbln"></div>
+      <div class="rbinf"><div class="rbnm" id="rbNm"></div><div class="rbtx" id="rbTx"></div></div>
+      <button class="rbx" onclick="clearReply()">✕</button>
+     </div>
+     <div class="inparea">
+      <div class="emtray" id="emTray"></div>
+      <div class="atmenu" id="atMenu">
+       <div class="amit" onclick="trgFile('img')"><div class="amic" style="background:rgba(139,92,246,.12)">🖼️</div>Photo</div>
+       <div class="amit" onclick="trgFile('vid')"><div class="amic" style="background:rgba(59,130,246,.12)">🎥</div>Video</div>
+       <div class="amit" onclick="trgFile('file')"><div class="amic" style="background:rgba(245,158,11,.12)">📄</div>File</div>
+       <div class="amit" onclick="sendLoc()"><div class="amic" style="background:rgba(34,197,94,.12)">📍</div>Location</div>
+       <div class="amit" onclick="openPollModal()"><div class="amic" style="background:rgba(14,165,233,.12)">📊</div>Poll</div>
+       <div class="amit" onclick="closeMenus()"><div class="amic" style="background:var(--bg4)">✕</div>Close</div>
+      </div>
+      <input type="file" id="iIn" accept="image/*,video/*" style="display:none" onchange="onImg(this)">
+      <input type="file" id="fIn" accept="*/*" style="display:none" onchange="onFile(this)">
+      <div class="inprow">
+       <button class="inpic" id="emBtn" onclick="toggleEmoji()">😊</button>
+       <button class="inpic" id="atBtn" onclick="toggleAtt()">📎</button>
+       <div class="recbar" id="recBar">
+        <div class="rdot"></div><div class="rtm" id="recT">0:00</div>
+        <div class="rwvs"><div class="rw"></div><div class="rw"></div><div class="rw"></div><div class="rw"></div><div class="rw"></div><div class="rw"></div><div class="rw"></div></div>
+        <button onclick="cancelRec()" style="color:var(--red);font-size:16px;border:none;background:none;cursor:pointer">🗑️</button>
+       </div>
+       <textarea class="chatin" id="chatIn" placeholder="Message…" rows="1" oninput="onType()" onkeydown="onKey(event)"></textarea>
+       <button class="micbtn" id="micBtn" title="Hold to record voice">🎤</button>
+       <button class="sndbtn" id="sndBtn" onclick="onSend()" style="display:none">➤</button>
+      </div>
+     </div>
+     <div class="infopanel" id="infoPanel">
+      <div class="iphead"><h3 id="ipTtl">Info</h3><button class="ib" onclick="closePanel()">✕</button></div>
+      <div class="ipbody" id="ipBody"></div>
+     </div>
+    </div>
+   </div>
+  </div>
+
+  <!-- FINANCE SECTION (desktop) -->
+  <div class="sect" id="secFin">
+   <div class="sb">
+    <div class="sbh"><div class="sbt">Finance</div><div class="sbacts"><button class="ib" onclick="openBudModal()">🎯</button><button class="ib pr" onclick="openAddModal('income')">＋</button></div></div>
+    <div class="sbsrch"><div class="sw">🔍<input id="fSrch" placeholder="Search transactions…" oninput="renderFinList()"></div></div>
+    <div class="sbtabs"><div class="sbtab on" id="ftAll" onclick="setFTab('all')">All</div><div class="sbtab" id="ftInc" onclick="setFTab('income')">Income</div><div class="sbtab" id="ftExp" onclick="setFTab('expense')">Expenses</div></div>
+    <div class="lst" id="finList"></div>
+   </div>
+   <div class="main"><div class="finmain" id="finMain"></div></div>
+  </div>
+ </div>
+</div>
+
+<!-- MOBILE FINANCE PAGE -->
+<div id="mobFinPage">
+ <div class="mob-fin-head">
+  <div style="font-size:17px;font-weight:800">💰 Finance</div>
+  <div style="display:flex;gap:6px">
+   <button class="ib" onclick="openBudModal()">🎯</button>
+   <button class="ib" onclick="openReportModal()">📊</button>
+   <button class="ib pr" onclick="openAddModal('income')">＋</button>
+  </div>
+ </div>
+ <div class="mob-fin-tabs">
+  <button class="mftab on" id="mftAll" onclick="setMFTab('all')">All</button>
+  <button class="mftab" id="mftInc" onclick="setMFTab('income')">Income</button>
+  <button class="mftab" id="mftExp" onclick="setMFTab('expense')">Expenses</button>
+ </div>
+ <div id="mobFinBody"></div>
+</div>
+
+<!-- CALL SCREEN -->
+<div class="callscr" id="callScr">
+ <div class="cs-bg"><div class="cs-blob"></div><div class="cs-blob"></div></div>
+ <div class="cs-av-wrap"><div class="cs-av-ring ringing" id="csRing"><div id="csAvCont"></div></div></div>
+ <div class="cs-name" id="csName"></div>
+ <div class="cs-status" id="csStatus">Calling…</div>
+ <div class="cs-timer" id="csTimer">00:00</div>
+ <div class="cs-vids" id="csVids">
+  <div class="cs-vid-box" id="csLocalVid">📷<div class="cs-vid-lbl">You</div></div>
+  <div class="cs-vid-box" id="csRemoteVid">👤<div class="cs-vid-lbl" id="csVidLbl"></div></div>
+ </div>
+ <div class="cs-btns">
+  <div class="cs-btn-wrap"><button class="csbtn ctl" id="csMic" onclick="toggleCallMic()">🎤</button><span class="cs-btn-lbl">Mute</span></div>
+  <div class="cs-btn-wrap" id="csCamWrap" style="display:none"><button class="csbtn ctl" id="csCam" onclick="toggleCallCam()">📹</button><span class="cs-btn-lbl">Camera</span></div>
+  <div class="cs-btn-wrap"><button class="csbtn ctl" onclick="toggleSpk()">🔊</button><span class="cs-btn-lbl">Speaker</span></div>
+  <div class="cs-btn-wrap"><button class="csbtn end" onclick="endCall()">📵</button><span class="cs-btn-lbl">End</span></div>
+ </div>
+</div>
+
+<!-- NOTIF -->
+<div id="notifBd" onclick="closeNotif()"></div>
+<div class="notifpanel" id="notifPanel">
+ <div class="nph"><h3>Notifications</h3><div class="nphacts"><button class="ib" onclick="clearNotifs()">🗑️</button><button class="ib" onclick="closeNotif()">✕</button></div></div>
+ <div class="npbody" id="notifList"></div>
+</div>
+
+<!-- MODALS -->
+<div class="ov" id="myProfOv"><div class="modal"><div class="mhd2"><div>
+   <div class="mttl">My Profile</div>
+   <div id="profSyncStatus" style="font-size:11px;margin-top:2px;color:var(--t3)"></div>
+  </div><button class="mx" onclick="closeOv('myProfOv')">✕</button></div><div style="text-align:center;margin-bottom:16px;position:relative;display:inline-block;left:50%;transform:translateX(-50%)"><div id="myProfAv" onclick="document.getElementById('chgAv').click()" style="cursor:pointer"></div><input type="file" id="chgAv" accept="image/*" style="display:none" onchange="chgMyAv(this)"><div style="position:absolute;bottom:-2px;right:-2px;width:26px;height:26px;border-radius:50%;background:var(--p);color:#fff;font-size:13px;display:flex;align-items:center;justify-content:center;pointer-events:none">📷</div></div><div class="fg"><label class="fl">Display Name</label><input class="fi" id="pN"></div><div class="fg"><label class="fl">About</label><input class="fi" id="pAb"></div><div class="fg"><label class="fl">Username</label><input class="fi" id="pU" readonly style="opacity:.5"></div><hr style="border:none;border-top:1px solid var(--b);margin:13px 0"><div class="macts"><button class="btnc" onclick="closeOv('myProfOv')">Cancel</button><button class="btnp" onclick="saveMyProf()">Save</button></div><button style="width:100%;padding:11px;border-radius:10px;margin-top:9px;background:var(--eg);color:var(--red);font-weight:700;font-size:13.5px;border:1px solid rgba(244,63,94,.2);cursor:pointer" onclick="doLogout()">Sign Out</button></div></div>
+<div class="ov" id="newChatOv"><div class="modal"><div class="mhd2"><div class="mttl">New Chat</div><button class="mx" onclick="closeOv('newChatOv')">✕</button></div><div class="sw" style="margin-bottom:10px">🔍<input id="ncSrch" placeholder="Search people…" oninput="renderPick('nc')"></div><div class="picklst" id="ncPick"></div></div></div>
+<div class="ov" id="grpS1Ov"><div class="modal"><div class="mhd2"><div class="mttl">New Group</div><button class="mx" onclick="closeOv('grpS1Ov')">✕</button></div><div class="fg"><label class="fl">Group Name</label><input class="fi" id="gN" placeholder="Group name…"></div><div class="fg"><label class="fl">Description</label><input class="fi" id="gD" placeholder="What's this about?"></div><div class="macts"><button class="btnc" onclick="closeOv('grpS1Ov')">Cancel</button><button class="btnp" onclick="grpStep2()">Next →</button></div></div></div>
+<div class="ov" id="grpS2Ov"><div class="modal"><div class="mhd2"><div class="mttl">Add Members</div><button class="mx" onclick="closeOv('grpS2Ov')">✕</button></div><div class="chiprow" id="grpChips"></div><div class="sw" style="margin-bottom:8px">🔍<input id="grpSrch" placeholder="Search…" oninput="renderPick('grp')"></div><div class="picklst" id="grpPick"></div><div class="macts"><button class="btnc" onclick="createGroup()">Skip & Create</button><button class="btnp" onclick="createGroup()">Create ✓</button></div></div></div>
+<div class="ov" id="addMemOv"><div class="modal"><div class="mhd2"><div class="mttl">Add Members</div><button class="mx" onclick="closeOv('addMemOv')">✕</button></div><div class="chiprow" id="addMemChips"></div><div class="sw" style="margin-bottom:8px">🔍<input id="addMemSrch" placeholder="Search…" oninput="renderPick('addMem')"></div><div class="picklst" id="addMemPick"></div><div class="macts"><button class="btnc" onclick="closeOv('addMemOv')">Cancel</button><button class="btnp" onclick="doAddMems()">Add</button></div></div></div>
+<div class="ov" id="addTxOv"><div class="modal"><div class="mhd2"><div class="mttl" id="txMtl">New Transaction</div><button class="mx" onclick="closeOv('addTxOv')">✕</button></div><div class="tsw"><button class="tswb inc on" id="tswI" onclick="setTType('income')">💚 Income</button><button class="tswb exp" id="tswE" onclick="setTType('expense')">🔴 Expense</button></div><div class="fg"><label class="fl">Amount</label><div class="amtw"><span class="amtpfx">$</span><input class="fi amtinp" id="txAmt" type="number" min="0" step="0.01" placeholder="0.00"></div></div><div class="fg"><label class="fl">Description</label><input class="fi" id="txDesc" placeholder="What's this for?"></div><div class="f2"><div class="fg"><label class="fl">Category</label><select class="fi" id="txCat"></select></div><div class="fg"><label class="fl">Date</label><input class="fi" id="txDate" type="date"></div></div><div class="f2"><div class="fg"><label class="fl">Account</label><select class="fi" id="txAcc"><option>💳 Card</option><option>💵 Cash</option><option>🏦 Bank</option><option>📱 Wallet</option><option>₿ Crypto</option></select></div><div class="fg"><label class="fl">Note</label><input class="fi" id="txNote" placeholder="Optional…"></div></div><div class="macts"><button class="btnc" onclick="closeOv('addTxOv')">Cancel</button><button class="btnp" id="txSvBtn" onclick="saveTx()">Save</button></div></div></div>
+<div class="ov" id="budOv"><div class="modal"><div class="mhd2"><div class="mttl">Set Budget</div><button class="mx" onclick="closeOv('budOv')">✕</button></div><div class="fg"><label class="fl">Category</label><select class="fi" id="budCat"></select></div><div class="fg"><label class="fl">Monthly Limit</label><div class="amtw"><span class="amtpfx">$</span><input class="fi amtinp" id="budAmt" type="number" min="0" placeholder="0.00"></div></div><div class="macts"><button class="btnc" onclick="closeOv('budOv')">Cancel</button><button class="btnp" onclick="saveBudget()">Save</button></div></div></div>
+<div class="ov" id="reportOv"><div class="modal"><div class="mhd2"><div class="mttl">Export Report</div><button class="mx" onclick="closeOv('reportOv')">✕</button></div><div class="f2" style="margin-bottom:12px"><div class="fg"><label class="fl">From</label><input class="fi" id="rptFrom" type="date" onchange="updateRptPrev()"></div><div class="fg"><label class="fl">To</label><input class="fi" id="rptTo" type="date" onchange="updateRptPrev()"></div></div><div class="fg"><label class="fl">Filter</label><select class="fi" id="rptFilter" onchange="updateRptPrev()"><option value="all">All</option><option value="income">Income</option><option value="expense">Expenses</option></select></div><div id="rptPrev" style="background:var(--bg3);border-radius:9px;padding:10px;margin-bottom:12px;font-size:12px;font-family:'DM Mono',monospace"></div><div style="display:flex;flex-direction:column;gap:8px"><button class="exp-btn csv" onclick="doCSV()">📥 Download CSV</button><button class="exp-btn pdf" onclick="doPDF()">📄 Download PDF</button><button class="exp-btn chat" onclick="sendRptChat()">💬 Send to Chat</button></div><p style="margin-top:9px;font-size:11px;color:var(--t2);background:var(--bg3);padding:8px;border-radius:8px;line-height:1.55">💡 Mobile: CSV saves to Files. PDF: tap Share → Save as PDF</p></div></div>
+<div class="ov" id="pollOv"><div class="modal"><div class="mhd2"><div class="mttl">Create Poll</div><button class="mx" onclick="closeOv('pollOv')">✕</button></div><div class="fg"><label class="fl">Question</label><input class="fi" id="pollQ" placeholder="Ask something…"></div><label class="fl">Options</label><div class="poll-opts" id="pollOpts"><div class="poll-orow"><input class="fi" placeholder="Option 1"><button class="poll-odel" onclick="rmPO(this)">✕</button></div><div class="poll-orow"><input class="fi" placeholder="Option 2"><button class="poll-odel" onclick="rmPO(this)">✕</button></div></div><button onclick="addPO()" style="font-size:13px;color:var(--p);font-weight:600;margin-bottom:12px;border:none;background:none;cursor:pointer">＋ Add Option</button><div class="macts"><button class="btnc" onclick="closeOv('pollOv')">Cancel</button><button class="btnp" onclick="sendPoll()">Send Poll</button></div></div></div>
+
+<div class="lb" id="lb" onclick="closeLB()"><button class="lbx" onclick="closeLB()">✕</button><img id="lbImg" src="" onclick="event.stopPropagation()"></div>
+<div class="toast" id="toast"></div>
+<!-- Firebase SDK (loaded before app script for guaranteed availability) -->
+<script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-auth-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-database-compat.js"></script>
+
 </body>
 </html>
