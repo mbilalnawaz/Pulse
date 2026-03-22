@@ -1376,7 +1376,13 @@ function renderMsg(m,us,chat,all){
   else{
     if(m.fwd)body+=`<div class="bfwd">↪ Forwarded</div>`;
     if(m.reply){const o=all.find(x=>x.id===m.reply);if(o){const rs=us[o.uid];body+=`<div class="breply"><div class="breplynm">${o.uid===ME.id?'You':esc(rs?.name||'?')}</div><div class="brepltx">${esc(o.text||'📷 Media')}</div></div>`}}
-    if(m.type==='img')body+=`<img class="bimg" src="${m.data}" alt="">`;
+    if(m.type==='img'){
+      if(m.large||!m.data){
+        body+=`<div class="bfile"><div class="bfic">🖼️</div><div><div class="bfnm">${esc(m.fname||'Media')}</div><div class="bfsz">${m.fsz||''}${m.large?' · Too large to display':''}</div></div></div>`;
+      } else {
+        body+=`<img class="bimg" src="${m.data}" alt="" loading="lazy">`;
+      }
+    }
     else if(m.type==='voice')body+=renderVoice(m);
     else if(m.type==='file'){
       if(m.large||!m.data){
@@ -1540,15 +1546,48 @@ function onKey(e){if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();onSend()}}
 /* ─ Files ─ */
 function trgFile(t){closeMenus();if(t==='img'||t==='vid'){document.getElementById('iIn').accept=t==='img'?'image/*':'video/*';document.getElementById('iIn').click()}else document.getElementById('fIn').click()}
 function onImg(inp){
-  const f=inp.files[0];if(!f||!AC)return;
+  const f=inp.files[0];
+  if(!f||!AC){inp.value='';return;}
   inp.value='';closeMenus();
-  if(f.size>50*1024*1024){toast('Max image/video size is 50MB','err');return;}
+  if(f.type.startsWith('video/')){
+    if(f.size>50*1024*1024){toast('Video max 50MB','err');return;}
+  } else {
+    if(f.size>10*1024*1024){toast('Image max 10MB','err');return;}
+  }
   toast('Sending…','info');
   const r=new FileReader();
-  r.onload=e=>push({type:'img',data:e.target.result,fname:f.name,ftype:f.type});
-  r.onerror=()=>toast('Could not read file','err');
+  r.onload=e=>{
+    const d=e.target.result;
+    if(d.length>9000000){
+      push({type:'img',data:'',fname:f.name,ftype:f.type,fsz:fmtSz(f.size),large:true});
+      toast('Media too large for cloud — sent locally only','info');
+    } else {
+      push({type:'img',data:d,fname:f.name,ftype:f.type});
+    }
+  };
+  r.onerror=()=>toast('Cannot read file','err');
   r.readAsDataURL(f);
 }
+function onFile(inp){
+  const f=inp.files[0];
+  if(!f||!AC){inp.value='';return;}
+  inp.value='';closeMenus();
+  if(f.size>100*1024*1024){toast('Max 100MB','err');return;}
+  toast('Sending '+f.name+'…','info');
+  const r=new FileReader();
+  r.onload=e=>{
+    const d=e.target.result;
+    if(d.length>8000000){
+      push({type:'file',data:'',fname:f.name,fsz:fmtSz(f.size),ftype:f.type||'',large:true});
+      toast('File info sent (too large for direct transfer)','info');
+    } else {
+      push({type:'file',data:d,fname:f.name,fsz:fmtSz(f.size),ftype:f.type||''});
+    }
+  };
+  r.onerror=()=>toast('Cannot read "'+f.name+'"','err');
+  r.readAsDataURL(f);
+}
+
 function sendLoc(){closeMenus();if(!navigator.geolocation){push({type:'loc',lat:33.68,lng:73.05});return}navigator.geolocation.getCurrentPosition(p=>push({type:'loc',lat:p.coords.latitude,lng:p.coords.longitude}),()=>push({type:'loc',lat:33.68,lng:73.05}))}
 
 /* ═══ HOLD-TO-RECORD ═══ */
@@ -1669,27 +1708,26 @@ function startCall(type){
   document.getElementById('callScr').classList.add('on');
   startRingTone();
   // Notify other user via Firebase
-  if(FB_READY && DB_FB && other){
+  if(FB_READY && DB_FB){
     const callId=uid();
     window._outgoingCallId=callId;
     window._activeCallId=callId;
-    // Write call notification to other user
-    DB_FB.ref('pulse/calls/'+other.id).set({
-      callId,from:ME.id,fromName:ME.name,fromAv:ME.av||'',
-      type,chatId:AC,ts:Date.now(),status:'ringing'
-    }).catch(()=>{});
-    // Write shared call status (both sides watch this)
+    const isGroup=c?.type==='grp';
+    const targets=isGroup?(c.members||[]).filter(id=>id!==ME.id):(other?[other.id]:[]);
+    if(!targets.length){toast('No one to call','info');document.getElementById('callScr').classList.remove('on');stopRingTone();return;}
+    const callData={callId,from:ME.id,fromName:ME.name,fromAv:ME.av||'',type,chatId:AC,ts:Date.now(),groupName:isGroup?c.name:null};
+    targets.forEach(tid=>DB_FB.ref('pulse/calls/'+tid).set(callData).catch(()=>{}));
     DB_FB.ref('pulse/callStatus/'+callId).set({status:'ringing',ts:Date.now()}).catch(()=>{});
-    // Listen for answer/decline
     DB_FB.ref('pulse/calls/'+ME.id+'/answer').on('value',snap=>{
       if(!snap.exists())return;
       const ans=snap.val();
       if(ans&&ans.callId===callId){
+        DB_FB.ref('pulse/calls/'+ME.id+'/answer').off();
         DB_FB.ref('pulse/calls/'+ME.id+'/answer').remove();
         if(ans.accepted){
-          DB_FB.ref('pulse/callStatus/'+callId).set({status:'connected',ts:Date.now()}).catch(()=>{});
+          DB_FB.ref('pulse/callStatus/'+callId).update({status:'connected'}).catch(()=>{});
           connectCall();
-        } else {
+        } else if(!isGroup){
           DB_FB.ref('pulse/callStatus/'+callId).remove().catch(()=>{});
           stopRingTone();
           document.getElementById('callScr').classList.remove('on');
@@ -1699,19 +1737,17 @@ function startCall(type){
         }
       }
     });
-    // Watch shared call status - if other side ends, close our screen too
     DB_FB.ref('pulse/callStatus/'+callId).on('value',snap=>{
       if(!snap.exists()&&window._activeCallId===callId&&callConnected){
-        // Call was ended by other side
         window._activeCallId=null;
         clearInterval(callTimer);callTimer=null;stopRingTone();
         if(localStream){localStream.getTracks().forEach(t=>t.stop());localStream=null;}
-  stopWebRTC(window._activeCallId);
+        stopWebRTC(callId);
         document.getElementById('csLocalVid').innerHTML='📷<div class="cs-vid-lbl">You</div>';
         document.getElementById('csRing').classList.remove('ringing');
         document.getElementById('callScr').classList.remove('on');
         callSecs=0;callConnected=false;
-        toast('Call ended by other side','info');
+        toast('Call ended','info');
       }
     });
   }
@@ -1727,8 +1763,18 @@ function startCall(type){
     // Start WebRTC as caller (offerer)
     if(window._activeCallId) startWebRTC(stream, true, window._activeCallId);
   }).catch(e=>{
-    toast('Camera/mic permission denied','err');
-    console.warn('getUserMedia error:',e);
+    if(e.name==='NotAllowedError'||e.name==='PermissionDeniedError')
+      toast('Camera/mic blocked — open browser Settings → Site Settings → Allow Camera & Microphone','err');
+    else if(e.name==='NotFoundError')
+      toast('No camera/mic found on this device','err');
+    else
+      toast('Camera/mic error: '+e.message,'err');
+    // Audio-only fallback for video calls
+    if(callType==='video'&&localStream===null){
+      navigator.mediaDevices.getUserMedia({audio:true,video:false})
+        .then(s=>{localStream=s;if(window._activeCallId)startWebRTC(s,true,window._activeCallId);})
+        .catch(()=>{});
+    }
   });
 }
 
@@ -1889,7 +1935,11 @@ function acceptCall(fromId,callId,type,chatId){
     if(type==='video'){showLocalVideo(stream);}
     // Start WebRTC as answerer
     if(window._activeCallId) startWebRTC(stream, false, window._activeCallId);
-  }).catch(e=>console.warn('getUserMedia error:',e));
+  }).catch(e=>{
+    if(e.name==='NotAllowedError'||e.name==='PermissionDeniedError')
+      toast('Camera/mic blocked — open browser Settings → Allow Camera & Microphone','err');
+    else toast('Camera/mic error: '+e.message,'err');
+  });
 }
 
 function declineCall(fromId,callId){
