@@ -1024,60 +1024,35 @@ function prevAv(inp){const f=inp.files[0];if(!f)return;const r=new FileReader();
 function showAErr(m){const e=document.getElementById('aerr');e.textContent=m;e.style.display='block'}
 /* ═══ GOOGLE SIGN-IN ═══ */
 function doGoogleSignIn(){
-  if(!FB_READY || !AUTH){ toast('Firebase not connected','err'); return; }
-  const provider = new firebase.auth.GoogleAuthProvider();
-  provider.setCustomParameters({ prompt: 'select_account' });
-
-  AUTH.signInWithPopup(provider).then(result => {
-    const user = result.user;
-    const gName = user.displayName || 'User';
-    const gEmail = user.email || '';
-    const gPhoto = user.photoURL || '';
-    // Use first part of email as username, sanitized
-    const un = (gEmail.split('@')[0] || user.uid.slice(0,12)).toLowerCase().replace(/[^a-z0-9_]/g,'_').slice(0,20);
-
-    // Check if user already exists in our DB
-    const us = gUsers();
-    let u = us[un] || Object.values(us).find(x => x.googleUid === user.uid);
-
-    if(!u){
-      // New Google user — create profile
-      u = {
-        id: un,
-        name: gName,
-        username: un,
-        about: 'Google Account',
-        av: gPhoto,
-        col: cFor(un),
-        googleUid: user.uid,
-        googleEmail: gEmail,
-        online: true,
-        seen: Date.now()
-      };
-      us[u.id] = u;
-      if(FB_READY&&DB_FB) DB_FB.ref('pulse/p3_users/'+u.id).set(u).catch(()=>{});
-      localStorage.setItem('p3_users', JSON.stringify(us));
-      toast('Welcome, '+gName+'! 👋', 'ok');
-    } else {
-      // Existing user — update photo and online status
-      u.online = true;
-      u.seen = Date.now();
-      if(gPhoto && !u.av) u.av = gPhoto;
-      us[u.id] = u;
-      if(FB_READY&&DB_FB) DB_FB.ref('pulse/p3_users/'+u.id).set(u).catch(()=>{});
-      localStorage.setItem('p3_users', JSON.stringify(us));
-    }
-    loginAs(u);
-  }).catch(err => {
-    if(err.code === 'auth/popup-closed-by-user') return; // user closed popup, no error
-    if(err.code === 'auth/popup-blocked'){
-      toast('Popup blocked — please allow popups for this site','err');
-    } else if(err.code === 'auth/unauthorized-domain'){
-      toast('Add your domain to Firebase Auth → Authorized domains','err');
-    } else {
-      toast(err.message || 'Google sign-in failed', 'err');
-    }
-    console.error('Google sign-in error:', err);
+  if(!FB_READY||!AUTH){showAErr('Firebase not connected. Check your internet connection.');return;}
+  const provider=new firebase.auth.GoogleAuthProvider();
+  provider.setCustomParameters({prompt:'select_account'});
+  AUTH.signInWithPopup(provider).then(result=>{
+    const user=result.user;
+    const gName=user.displayName||'User';
+    const gEmail=user.email||'';
+    const gPhoto=user.photoURL||'';
+    const un=(gEmail.split('@')[0]||user.uid.slice(0,12)).toLowerCase().replace(/[^a-z0-9_]/g,'_').slice(0,20);
+    DB_FB.ref('pulse/p3_users').orderByChild('googleUid').equalTo(user.uid).once('value')
+      .then(snap=>{
+        let u;
+        if(snap.exists()){
+          u=Object.values(snap.val())[0];
+          u.online=true;u.seen=Date.now();if(gPhoto&&!u.av)u.av=gPhoto;
+        } else {
+          u={id:un,name:gName,username:un,about:'Google Account',av:gPhoto,col:cFor(un),googleUid:user.uid,googleEmail:gEmail,online:true,seen:Date.now()};
+          toast('Welcome, '+gName+'!','ok');
+        }
+        DB_FB.ref('pulse/p3_users/'+u.id).set(u).catch(()=>{});
+        const us=DB.g('p3_users',{});us[u.id]=u;
+        localStorage.setItem('p3_users',JSON.stringify(us));
+        loginAs(u);
+      }).catch(e=>{toast('Google sign-in error: '+e.message,'err');});
+  }).catch(err=>{
+    if(err.code==='auth/popup-closed-by-user')return;
+    if(err.code==='auth/popup-blocked')showAErr('Popup blocked — allow popups for this site');
+    else if(err.code==='auth/unauthorized-domain')showAErr('Add "'+location.hostname+'" to Firebase Auth Authorized domains');
+    else showAErr(err.message||'Google sign-in failed');
   });
 }
 
@@ -1091,101 +1066,166 @@ function doReg(){
         ab=document.getElementById('rAb').value.trim()||'Available',
         pw=document.getElementById('rP').value,
         pw2=document.getElementById('rP2').value;
-  if(!nm||!un||!pw){showAErr('Fill all required fields');return}
-  if(pw!==pw2){showAErr("Passwords don't match");return}
-  if(pw.length<4){showAErr('Password min 4 chars');return}
+  if(!nm){showAErr('Enter your name');return;}
+  if(!un){showAErr('Enter a username');return;}
+  if(!pw){showAErr('Enter a password');return;}
+  if(pw!==pw2){showAErr("Passwords don't match");return;}
+  if(pw.length<4){showAErr('Password needs 4+ characters');return;}
 
-  const cbtn=document.querySelector('.cbtn');if(cbtn){cbtn.textContent='Creating…';cbtn.disabled=true;}
+  // Disable button to prevent double-submit
+  const btn=document.querySelector('#fpR .cbtn');
+  if(btn){btn.textContent='Creating account…';btn.disabled=true;}
 
-  function _finishReg(){
-    const us=gUsers();
-    if(us[un]){showAErr('Username taken');if(cbtn){cbtn.textContent='Create Account →';cbtn.disabled=false;}return;}
-    const u={id:un,name:nm,username:un,about:ab,av:regAv,col:cFor(un),online:true,seen:Date.now()};
-    us[un]=u; if(FB_READY&&DB_FB) DB_FB.ref('pulse/p3_users/'+un).set(u).catch(()=>{}); localStorage.setItem('p3_users',JSON.stringify(us)); loginAs(u);
+  function resetBtn(){if(btn){btn.textContent='Create Account →';btn.disabled=false;}}
+
+  function createUser(){
+    const u={id:un,name:nm,username:un,about:ab,av:regAv||'',col:cFor(un),online:true,seen:Date.now()};
+    // Save to Firebase first, then localStorage
+    if(FB_READY&&DB_FB){
+      DB_FB.ref('pulse/p3_users/'+un).set(u)
+        .then(()=>{
+          const us=DB.g('p3_users',{});us[un]=u;
+          localStorage.setItem('p3_users',JSON.stringify(us));
+          loginAs(u);
+        })
+        .catch(e=>{showAErr('Save failed: '+e.message);resetBtn();});
+    } else {
+      const us=DB.g('p3_users',{});us[un]=u;
+      localStorage.setItem('p3_users',JSON.stringify(us));
+      loginAs(u);
+    }
   }
 
-  if(FB_READY && AUTH){
-    AUTH.createUserWithEmailAndPassword(toEmail(un), pw)
-      .then(cred=>{ cred.user.updateProfile({displayName:un}); _finishReg(); })
-      .catch(err=>{
-        if(err.code==='auth/email-already-in-use'){showAErr('Username already registered — try Sign In');}
-        else{showAErr(err.message||'Registration failed');}
-        if(cbtn){cbtn.textContent='Create Account →';cbtn.disabled=false;}
-      })
+  if(FB_READY&&AUTH){
+    // Check username not taken in Firebase
+    DB_FB.ref('pulse/p3_users/'+un).once('value').then(snap=>{
+      if(snap.exists()){showAErr('Username already taken');resetBtn();return;}
+      // Create Firebase Auth account
+      AUTH.createUserWithEmailAndPassword(toEmail(un),pw)
+        .then(cred=>{cred.user.updateProfile({displayName:un}).catch(()=>{});createUser();})
+        .catch(err=>{
+          if(err.code==='auth/email-already-in-use'){showAErr('Username taken — try signing in');}
+          else{showAErr(err.message||'Registration failed');}
+          resetBtn();
+        });
+    }).catch(()=>{
+      // Firebase unreachable - create locally
+      createUser();
+    });
   } else {
-    _finishReg(); // local-only mode
+    // Offline mode
+    const us=DB.g('p3_users',{});
+    if(us[un]){showAErr('Username taken');resetBtn();return;}
+    createUser();
   }
 }
 
 function doLogin(){
   const un=document.getElementById('lU').value.trim().toLowerCase(),
         pw=document.getElementById('lP').value;
-  if(!un||!pw){showAErr('Fill all fields');return;}
+  if(!un){showAErr('Enter username');return;}
+  if(!pw){showAErr('Enter password');return;}
 
-  const btn=document.getElementById('fpL')?.querySelector('.cbtn');
+  const btn=document.querySelector('#fpL .cbtn');
   if(btn){btn.textContent='Signing in…';btn.disabled=true;}
+  function resetBtn(){if(btn){btn.textContent='Sign In →';btn.disabled=false;}}
 
-  function _finishLogin(uid){
-    const us=gUsers();
-    const u=us[uid]||us[un];
-    if(!u){showAErr('Account not found — please register first');if(btn){btn.textContent='Sign In →';btn.disabled=false;}return;}
-    u.online=true;u.seen=Date.now();us[u.id]=u; if(FB_READY&&DB_FB) DB_FB.ref('pulse/p3_users/'+u.id).update({online:true,seen:Date.now()}).catch(()=>{}); localStorage.setItem('p3_users',JSON.stringify(us)); loginAs(u);
+  function finishLogin(u){
+    if(!u||!u.id){showAErr('Account not found. Please register first.');resetBtn();return;}
+    u.online=true;u.seen=Date.now();
+    // Save merged into local
+    const us=DB.g('p3_users',{});us[u.id]=u;
+    localStorage.setItem('p3_users',JSON.stringify(us));
+    // Update presence in Firebase
+    if(FB_READY&&DB_FB) DB_FB.ref('pulse/p3_users/'+u.id).update({online:true,seen:Date.now()}).catch(()=>{});
+    loginAs(u);
   }
 
-  if(FB_READY && AUTH){
-    AUTH.signInWithEmailAndPassword(toEmail(un), pw)
+  if(FB_READY&&AUTH){
+    AUTH.signInWithEmailAndPassword(toEmail(un),pw)
       .then(cred=>{
-        // Pull latest user data from Firebase first
-        if(DB_FB){ DB_FB.ref('pulse/p3_users/'+un).once('value').then(snap=>{ if(snap.exists()){const val=snap.val();const us=gUsers();us[un]=val;localStorage.setItem('p3_users',JSON.stringify(us));} _finishLogin(un); }); }
-        else _finishLogin(un);
+        // Always fetch fresh user data from Firebase on login
+        if(DB_FB){
+          DB_FB.ref('pulse/p3_users/'+un).once('value')
+            .then(snap=>{
+              if(snap.exists()){finishLogin(snap.val());}
+              else{
+                // User in Auth but not in DB (edge case) - create profile
+                const u={id:un,name:cred.user.displayName||un,username:un,about:'',av:'',col:cFor(un),online:true,seen:Date.now()};
+                DB_FB.ref('pulse/p3_users/'+un).set(u).catch(()=>{});
+                finishLogin(u);
+              }
+            })
+            .catch(()=>{
+              // Firebase unreachable - try local
+              const us=DB.g('p3_users',{});
+              finishLogin(us[un]);
+            });
+        } else {
+          const us=DB.g('p3_users',{});finishLogin(us[un]);
+        }
       })
       .catch(err=>{
-        if(err.code==='auth/user-not-found'||err.code==='auth/invalid-credential'){showAErr('Wrong username or password');}
-        else if(err.code==='auth/wrong-password'){showAErr('Wrong password');}
-        else{showAErr(err.message||'Sign in failed');}
-        if(btn){btn.textContent='Sign In →';btn.disabled=false;}
+        const code=err.code||'';
+        if(code==='auth/user-not-found'||code==='auth/invalid-credential'||code==='auth/invalid-email')
+          showAErr('Wrong username or password');
+        else if(code==='auth/wrong-password')
+          showAErr('Wrong password');
+        else if(code==='auth/too-many-requests')
+          showAErr('Too many attempts — try again later');
+        else
+          showAErr(err.message||'Sign in failed');
+        resetBtn();
       });
   } else {
-    // Local mode fallback
-    const us=gUsers();if(!us[un]){showAErr('User not found');return;}
-    _finishLogin(un);
+    // Offline mode
+    const us=DB.g('p3_users',{});
+    if(!us[un]){showAErr('Account not found');return;}
+    finishLogin(us[un]);
   }
 }
 
 function loginAs(u){
-  if(!u||!u.id){console.warn('loginAs called with invalid user',u);return;}
-  // Prevent duplicate logins (onAuthStateChanged can fire multiple times)
-  if(window._appInited && ME && ME.id===u.id) return;
+  if(!u||!u.id){console.warn('loginAs: invalid user');return;}
+  // Allow re-login for same user (re-auth), block only if DIFFERENT user already active
+  if(window._appInited && ME && ME.id!==u.id){
+    console.warn('loginAs blocked - different user already active');return;
+  }
   window._appInited=true;
   ME=u;
   localStorage.setItem('p3_sess',u.id);
+  // Hide auth, show app
   document.getElementById('authWall').style.display='none';
   document.getElementById('app').style.display='block';
+  const ld=document.getElementById('authLoading');if(ld)ld.style.display='none';
+  const abox=document.querySelector('.abox');if(abox)abox.style.display='block';
   isMuted=DB.g('p3_mute_'+ME.id,{});
   thMode=localStorage.getItem('p3_theme')||'auto';
-  if(FB_READY && DB_FB){
-    // Pull latest data from Firebase then start app
-    Promise.all([
-      // MERGE users - never overwrite (each device only knows its own users locally)
+  if(FB_READY&&DB_FB){
+    // Pull all data from Firebase, merging into local cache
+    const pulls=[
       DB_FB.ref('pulse/p3_users').once('value').then(s=>{
-        if(s.exists()){
-          const cloud=s.val();
-          const local=DB.g('p3_users',{});
-          // Cloud is authoritative - merge cloud into local
-          const merged=Object.assign({},local,cloud);
-          localStorage.setItem('p3_users',JSON.stringify(merged));
-        }
+        if(!s.exists())return;
+        const cloud=s.val();
+        const local=DB.g('p3_users',{});
+        localStorage.setItem('p3_users',JSON.stringify(Object.assign({},local,cloud)));
       }).catch(()=>{}),
       DB_FB.ref('pulse/p3_chats').once('value').then(s=>{
-        if(s.exists()){
-          const cloud=s.val();
-          const local=DB.g('p3_chats',{});
-          localStorage.setItem('p3_chats',JSON.stringify(Object.assign({},local,cloud)));
-        }
+        if(!s.exists())return;
+        const cloud=s.val();
+        const local=DB.g('p3_chats',{});
+        localStorage.setItem('p3_chats',JSON.stringify(Object.assign({},local,cloud)));
       }).catch(()=>{}),
-      DB_FB.ref('pulse/p3_tx').once('value').then(s=>{if(s.exists()){const v=s.val();localStorage.setItem('p3_tx',JSON.stringify(Array.isArray(v)?v:Object.values(v||{})));} }).catch(()=>{}),
-      DB_FB.ref('pulse/p3_buds').once('value').then(s=>{if(s.exists())localStorage.setItem('p3_buds',JSON.stringify(s.val()));}).catch(()=>{}),
-    ]).finally(()=>{ initApp(); setupFirebaseSync(); });
+      DB_FB.ref('pulse/p3_tx').once('value').then(s=>{
+        if(!s.exists())return;
+        const v=s.val();
+        localStorage.setItem('p3_tx',JSON.stringify(Array.isArray(v)?v:Object.values(v||{})));
+      }).catch(()=>{}),
+      DB_FB.ref('pulse/p3_buds').once('value').then(s=>{
+        if(s.exists())localStorage.setItem('p3_buds',JSON.stringify(s.val()));
+      }).catch(()=>{}),
+    ];
+    Promise.all(pulls).finally(()=>{initApp();setupFirebaseSync();});
   } else {
     initApp();
   }
@@ -2048,59 +2088,58 @@ window.matchMedia('(prefers-color-scheme:dark)').addEventListener('change',()=>{
 /* ═══ BOOT ═══ */
 /* Called once Firebase is confirmed ready (or failed) */
 function triggerAuthCheck(){
-  if(window._authCheckDone) return; // prevent duplicate auth checks
-  window._authCheckDone=true;
-  if(FB_READY && AUTH){
-    AUTH.onAuthStateChanged(firebaseUser=>{
-      if(!firebaseUser){
-        const sid=localStorage.getItem('p3_sess');
-        if(sid){const us=DB.g('p3_users',{});if(us[sid]){loginAs(us[sid]);}}
-        return;
-      }
-      const firebaseUid=firebaseUser.uid;
-      const isGoogle=(firebaseUser.providerData?.[0]?.providerId==='google.com');
-      if(isGoogle && DB_FB){
-        DB_FB.ref('pulse/p3_users').orderByChild('googleUid').equalTo(firebaseUid).once('value')
-          .then(snap=>{
-            if(snap.exists()){const u=Object.values(snap.val())[0];localStorage.setItem('p3_sess',u.id);loginAs(u);}
-            else{
-              // Google user not yet in DB - they need to re-register
-              console.warn('Google user not in DB');
-              localStorage.removeItem('p3_sess');
-            }
-          })
-          .catch(()=>{
-            const sid=localStorage.getItem('p3_sess');
-            if(sid){const us=DB.g('p3_users',{});const u=us[sid];if(u&&u.id)loginAs(u);}
-          });
-      } else if(DB_FB){
-        const un=(firebaseUser.email||'').replace('@pulse.app','');
-        DB_FB.ref('pulse/p3_users/'+un).once('value')
-          .then(snap=>{
-            if(snap.exists()){
-              const u=snap.val();
-              if(u&&u.id){localStorage.setItem('p3_sess',u.id);loginAs(u);}
-            } else {
-              // User not in Firebase yet - could be new device
-              // Try local cache
-              const sid=localStorage.getItem('p3_sess');
-              if(sid){const us=DB.g('p3_users',{});const u=us[sid];if(u&&u.id)loginAs(u);}
-            }
-          })
-          .catch(()=>{
-            const sid=localStorage.getItem('p3_sess');
-            if(sid){const us=DB.g('p3_users',{});const u=us[sid];if(u&&u.id)loginAs(u);}
-          });
-      } else {
-        const sid=localStorage.getItem('p3_sess');
-        if(sid){const us=DB.g('p3_users',{});if(us[sid])loginAs(us[sid]);}
-      }
-    });
-  } else {
-    /* Offline mode - use local session cache */
+  // Only auto-login if not already logged in manually
+  if(window._appInited) return;
+  if(!FB_READY||!AUTH){
+    // Offline - try local session
     const sid=localStorage.getItem('p3_sess');
-    if(sid){const us=DB.g('p3_users',{});if(us[sid])loginAs(us[sid]);}
+    if(sid){const us=DB.g('p3_users',{});const u=us[sid];if(u&&u.id)loginAs(u);}
+    return;
   }
+  AUTH.onAuthStateChanged(firebaseUser=>{
+    if(window._appInited) return; // already logged in via manual login
+    if(!firebaseUser){
+      // Not signed in - show login screen (already showing)
+      const ld=document.getElementById('authLoading');if(ld)ld.style.display='none';
+      const abox=document.querySelector('.abox');if(abox)abox.style.display='block';
+      return;
+    }
+    // Firebase says user is signed in - restore session
+    const isGoogle=(firebaseUser.providerData?.[0]?.providerId==='google.com');
+    const un=isGoogle?null:(firebaseUser.email||'').replace('@pulse.app','');
+    if(isGoogle){
+      // Google user - find by UID
+      DB_FB.ref('pulse/p3_users').orderByChild('googleUid').equalTo(firebaseUser.uid).once('value')
+        .then(snap=>{
+          if(window._appInited)return;
+          if(snap.exists()){
+            const u=Object.values(snap.val())[0];
+            if(u&&u.id)loginAs(u);
+          } else {
+            // Show login screen - Google user not registered yet
+            const ld=document.getElementById('authLoading');if(ld)ld.style.display='none';
+            const abox=document.querySelector('.abox');if(abox)abox.style.display='block';
+          }
+        }).catch(()=>{
+          const ld=document.getElementById('authLoading');if(ld)ld.style.display='none';
+          const abox=document.querySelector('.abox');if(abox)abox.style.display='block';
+        });
+    } else if(un){
+      DB_FB.ref('pulse/p3_users/'+un).once('value')
+        .then(snap=>{
+          if(window._appInited)return;
+          if(snap.exists()){
+            const u=snap.val();if(u&&u.id)loginAs(u);
+          } else {
+            const ld=document.getElementById('authLoading');if(ld)ld.style.display='none';
+            const abox=document.querySelector('.abox');if(abox)abox.style.display='block';
+          }
+        }).catch(()=>{
+          const ld=document.getElementById('authLoading');if(ld)ld.style.display='none';
+          const abox=document.querySelector('.abox');if(abox)abox.style.display='block';
+        });
+    }
+  });
 }
 
 window.addEventListener('load',()=>{
@@ -2108,15 +2147,6 @@ window.addEventListener('load',()=>{
   applyTheme();
   ['lU','lP'].forEach(id=>document.getElementById(id)?.addEventListener('keydown',e=>e.key==='Enter'&&doLogin()));
   ['rN','rU','rAb','rP','rP2'].forEach(id=>document.getElementById(id)?.addEventListener('keydown',e=>e.key==='Enter'&&doReg()));
-  // Show spinner if we have a cached session (auto-login in progress)
-  const hasSess=localStorage.getItem('p3_sess');
-  if(hasSess){
-    const abox=document.querySelector('.abox');
-    const ld=document.getElementById('authLoading');
-    if(abox)abox.style.display='none';
-    if(ld)ld.style.display='block';
-  }
-  /* Start Firebase init - will call triggerAuthCheck() when done */
   initFirebase();
 });
 
