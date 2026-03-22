@@ -1201,33 +1201,33 @@ function loginAs(u){
   const abox=document.querySelector('.abox');if(abox)abox.style.display='block';
   isMuted=DB.g('p3_mute_'+ME.id,{});
   thMode=localStorage.getItem('p3_theme')||'auto';
+  // Start app IMMEDIATELY with cached data (fast login)
+  initApp();
+  // Then pull fresh data from Firebase in background
   if(FB_READY&&DB_FB){
-    // Pull all data from Firebase, merging into local cache
-    const pulls=[
-      DB_FB.ref('pulse/p3_users').once('value').then(s=>{
-        if(!s.exists())return;
-        const cloud=s.val();
-        const local=DB.g('p3_users',{});
-        localStorage.setItem('p3_users',JSON.stringify(Object.assign({},local,cloud)));
-      }).catch(()=>{}),
-      DB_FB.ref('pulse/p3_chats').once('value').then(s=>{
-        if(!s.exists())return;
-        const cloud=s.val();
-        const local=DB.g('p3_chats',{});
-        localStorage.setItem('p3_chats',JSON.stringify(Object.assign({},local,cloud)));
-      }).catch(()=>{}),
-      DB_FB.ref('pulse/p3_tx').once('value').then(s=>{
-        if(!s.exists())return;
-        const v=s.val();
-        localStorage.setItem('p3_tx',JSON.stringify(Array.isArray(v)?v:Object.values(v||{})));
-      }).catch(()=>{}),
-      DB_FB.ref('pulse/p3_buds').once('value').then(s=>{
-        if(s.exists())localStorage.setItem('p3_buds',JSON.stringify(s.val()));
-      }).catch(()=>{}),
-    ];
-    Promise.all(pulls).finally(()=>{initApp();setupFirebaseSync();});
-  } else {
-    initApp();
+    // Background sync - doesn't block app start
+    DB_FB.ref('pulse/p3_users').once('value').then(s=>{
+      if(!s.exists())return;
+      const merged=Object.assign({},DB.g('p3_users',{}),s.val());
+      localStorage.setItem('p3_users',JSON.stringify(merged));
+      updateDockAv();renderChatList();
+    }).catch(()=>{});
+    DB_FB.ref('pulse/p3_chats').once('value').then(s=>{
+      if(!s.exists())return;
+      const merged=Object.assign({},DB.g('p3_chats',{}),s.val());
+      localStorage.setItem('p3_chats',JSON.stringify(merged));
+      renderChatList();
+    }).catch(()=>{});
+    DB_FB.ref('pulse/p3_tx').once('value').then(s=>{
+      if(!s.exists())return;
+      const v=s.val();
+      localStorage.setItem('p3_tx',JSON.stringify(Array.isArray(v)?v:Object.values(v||{})));
+    }).catch(()=>{});
+    DB_FB.ref('pulse/p3_buds').once('value').then(s=>{
+      if(s.exists())localStorage.setItem('p3_buds',JSON.stringify(s.val()));
+    }).catch(()=>{});
+    // Setup real-time listeners after a short delay
+    setTimeout(setupFirebaseSync, 500);
   }
 }
 
@@ -1404,15 +1404,19 @@ function renderMsg(m,us,chat,all){
 function renderVoice(m){
   const heights=[40,60,80,55,90,35,70,50,85,45,75,40,65,55,95,35,60,50,80,45,55,38,72,30,62];
   const bars=heights.map(h=>`<div class="vb" style="height:${h}%;flex:1;max-width:4px"></div>`).join('');
-  const hasAudio=!!m.audioB64;
   return`<div class="bvoice">
-    <button class="vplay" onclick="${hasAudio?`playVoice('${m.id}',this)`:`fakeVoice('${m.id}',this)`}">▶</button>
+    <button class="vplay" onclick="playVoice('${m.id}',this)">▶</button>
     <div class="vwv" id="vwv_${m.id}">${bars}</div>
     <span class="vdur">${m.dur||'0:00'}</span>
   </div>`;
 }
 function playVoice(id,btn){
-  const m=gMsgs(AC).find(x=>x.id===id);if(!m?.audioB64)return;
+  const m=gMsgs(AC).find(x=>x.id===id);
+  if(!m){return;}
+  if(!m.audioB64){
+    // No audio data - play fake animation
+    fakeVoice(id,btn);return;
+  }
   // Stop any currently playing voice
   if(window._playingAudio){try{window._playingAudio.pause();window._playingAudio.currentTime=0;}catch(e){}}
   if(window._playingBarAnim){clearInterval(window._playingBarAnim);}
@@ -1478,12 +1482,24 @@ function push(data){
   if(FB_READY && DB_FB){
     // Store each message by its ID - much more scalable than storing whole array
     const msgData = {...newMsg};
-    // For large file/image data, check size (Firebase limit ~10MB per write)
-    if(msgData.data && msgData.data.length > 5000000){
-      toast('File too large for cloud sync - sent locally only','info');
+    // Firebase Realtime DB limit: 10MB per node
+    // Base64 encoding adds ~33% overhead, so 7MB file = ~10MB base64
+    const dataSize = msgData.data ? msgData.data.length : 0;
+    if(dataSize > 9000000){
+      // Too large for Firebase - send metadata only, data stays local
+      const metaOnly = {...msgData, data:'', large:true};
+      DB_FB.ref('pulse/msgs/'+AC+'/'+newMsg.id).set(metaOnly)
+        .catch(e=>console.warn('meta write error:',e));
+      toast('File sent locally (too large for cloud sync)','info');
     } else {
       DB_FB.ref('pulse/msgs/'+AC+'/'+newMsg.id).set(msgData)
-        .catch(e=>{console.warn('msg write error:',e);toast('Message may not sync to other devices','info');});
+        .catch(e=>{
+          console.warn('msg write error:',e);
+          // Try sending metadata only as fallback
+          const metaOnly = {...msgData, data:'', large:true};
+          DB_FB.ref('pulse/msgs/'+AC+'/'+newMsg.id).set(metaOnly).catch(()=>{});
+          toast('File sent locally (upload failed)','info');
+        });
     }
     // Update chat metadata
     const ch=gChats();
@@ -1656,10 +1672,14 @@ function startCall(type){
   if(FB_READY && DB_FB && other){
     const callId=uid();
     window._outgoingCallId=callId;
+    window._activeCallId=callId;
+    // Write call notification to other user
     DB_FB.ref('pulse/calls/'+other.id).set({
       callId,from:ME.id,fromName:ME.name,fromAv:ME.av||'',
       type,chatId:AC,ts:Date.now(),status:'ringing'
     }).catch(()=>{});
+    // Write shared call status (both sides watch this)
+    DB_FB.ref('pulse/callStatus/'+callId).set({status:'ringing',ts:Date.now()}).catch(()=>{});
     // Listen for answer/decline
     DB_FB.ref('pulse/calls/'+ME.id+'/answer').on('value',snap=>{
       if(!snap.exists())return;
@@ -1667,8 +1687,10 @@ function startCall(type){
       if(ans&&ans.callId===callId){
         DB_FB.ref('pulse/calls/'+ME.id+'/answer').remove();
         if(ans.accepted){
+          DB_FB.ref('pulse/callStatus/'+callId).set({status:'connected',ts:Date.now()}).catch(()=>{});
           connectCall();
         } else {
+          DB_FB.ref('pulse/callStatus/'+callId).remove().catch(()=>{});
           stopRingTone();
           document.getElementById('callScr').classList.remove('on');
           document.getElementById('csRing').classList.remove('ringing');
@@ -1677,21 +1699,117 @@ function startCall(type){
         }
       }
     });
+    // Watch shared call status - if other side ends, close our screen too
+    DB_FB.ref('pulse/callStatus/'+callId).on('value',snap=>{
+      if(!snap.exists()&&window._activeCallId===callId&&callConnected){
+        // Call was ended by other side
+        window._activeCallId=null;
+        clearInterval(callTimer);callTimer=null;stopRingTone();
+        if(localStream){localStream.getTracks().forEach(t=>t.stop());localStream=null;}
+  stopWebRTC(window._activeCallId);
+        document.getElementById('csLocalVid').innerHTML='📷<div class="cs-vid-lbl">You</div>';
+        document.getElementById('csRing').classList.remove('ringing');
+        document.getElementById('callScr').classList.remove('on');
+        callSecs=0;callConnected=false;
+        toast('Call ended by other side','info');
+      }
+    });
   }
   // Request camera/mic
-  const constraints=type==='video'?{video:{facingMode:'user'},audio:true}:{audio:true,video:false};
+  const constraints=type==='video'?{video:{facingMode:'user',width:{ideal:640},height:{ideal:480}},audio:true}:{audio:true,video:false};
   navigator.mediaDevices.getUserMedia(constraints).then(stream=>{
     localStream=stream;
     if(type==='video'){
-      const box=document.getElementById('csLocalVid');box.innerHTML='';
-      const vid=document.createElement('video');vid.autoplay=true;vid.muted=true;vid.playsInline=true;
-      vid.style.cssText='position:absolute;inset:0;width:100%;height:100%;object-fit:cover;border-radius:14px';
-      vid.srcObject=stream;box.appendChild(vid);
-      const lbl=document.createElement('div');lbl.className='cs-vid-lbl';lbl.textContent='You';box.appendChild(lbl);
+      showLocalVideo(stream);
       document.getElementById('csVids').classList.add('on');
       document.getElementById('csCamWrap').style.display='flex';
     }
-  }).catch(()=>toast('Camera/mic denied','info'));
+    // Start WebRTC as caller (offerer)
+    if(window._activeCallId) startWebRTC(stream, true, window._activeCallId);
+  }).catch(e=>{
+    toast('Camera/mic permission denied','err');
+    console.warn('getUserMedia error:',e);
+  });
+}
+
+function showLocalVideo(stream){
+  const box=document.getElementById('csLocalVid');box.innerHTML='';
+  const vid=document.createElement('video');
+  vid.autoplay=true;vid.muted=true;vid.playsInline=true;
+  vid.style.cssText='position:absolute;inset:0;width:100%;height:100%;object-fit:cover;border-radius:14px';
+  vid.srcObject=stream;box.appendChild(vid);
+  const lbl=document.createElement('div');lbl.className='cs-vid-lbl';lbl.textContent='You';box.appendChild(lbl);
+}
+
+function showRemoteVideo(stream){
+  const box=document.getElementById('csRemoteVid');box.innerHTML='';
+  const vid=document.createElement('video');
+  vid.autoplay=true;vid.playsInline=true;
+  vid.style.cssText='position:absolute;inset:0;width:100%;height:100%;object-fit:cover;border-radius:14px';
+  vid.srcObject=stream;box.appendChild(vid);
+  const lbl=document.createElement('div');lbl.className='cs-vid-lbl';lbl.id='csVidLbl';lbl.textContent=document.getElementById('csName')?.textContent||'Remote';box.appendChild(lbl);
+}
+
+/* ═══ WEBRTC PEER CONNECTION ═══ */
+let peerConn=null;
+const RTC_CONFIG={iceServers:[{urls:'stun:stun.l.google.com:19302'},{urls:'stun:stun1.l.google.com:19302'}]};
+
+function startWebRTC(stream, isOfferer, callId){
+  if(!FB_READY||!DB_FB)return;
+  try{
+    peerConn=new RTCPeerConnection(RTC_CONFIG);
+    // Add local tracks
+    stream.getTracks().forEach(t=>peerConn.addTrack(t,stream));
+    // When remote track arrives - show it
+    peerConn.ontrack=e=>{
+      if(e.streams[0]) showRemoteVideo(e.streams[0]);
+    };
+    // ICE candidate exchange via Firebase
+    peerConn.onicecandidate=e=>{
+      if(e.candidate&&callId){
+        DB_FB.ref('pulse/webrtc/'+callId+'/'+(isOfferer?'offerCandidates':'answerCandidates')).push(e.candidate.toJSON()).catch(()=>{});
+      }
+    };
+    const sigRef=DB_FB.ref('pulse/webrtc/'+callId);
+    if(isOfferer){
+      // Create offer
+      peerConn.createOffer().then(offer=>peerConn.setLocalDescription(offer)).then(()=>{
+        sigRef.child('offer').set({type:peerConn.localDescription.type,sdp:peerConn.localDescription.sdp}).catch(()=>{});
+      }).catch(e=>console.warn('offer error:',e));
+      // Listen for answer
+      sigRef.child('answer').on('value',snap=>{
+        if(!snap.exists()||peerConn.remoteDescription)return;
+        const ans=new RTCSessionDescription(snap.val());
+        peerConn.setRemoteDescription(ans).catch(e=>console.warn('setRemote error:',e));
+      });
+      // Listen for answer ICE candidates
+      sigRef.child('answerCandidates').on('child_added',snap=>{
+        if(!snap.exists())return;
+        peerConn.addIceCandidate(new RTCIceCandidate(snap.val())).catch(()=>{});
+      });
+    } else {
+      // Listen for offer from caller
+      sigRef.child('offer').once('value').then(snap=>{
+        if(!snap.exists())return;
+        const offer=new RTCSessionDescription(snap.val());
+        return peerConn.setRemoteDescription(offer);
+      }).then(()=>peerConn.createAnswer()).then(ans=>peerConn.setLocalDescription(ans)).then(()=>{
+        sigRef.child('answer').set({type:peerConn.localDescription.type,sdp:peerConn.localDescription.sdp}).catch(()=>{});
+      }).catch(e=>console.warn('answer error:',e));
+      // Listen for offer ICE candidates
+      sigRef.child('offerCandidates').on('child_added',snap=>{
+        if(!snap.exists())return;
+        peerConn.addIceCandidate(new RTCIceCandidate(snap.val())).catch(()=>{});
+      });
+    }
+  }catch(e){console.warn('WebRTC error:',e);}
+}
+
+function stopWebRTC(callId){
+  try{if(peerConn){peerConn.close();peerConn=null;}}catch(e){}
+  if(FB_READY&&DB_FB&&callId){
+    DB_FB.ref('pulse/webrtc/'+callId).remove().catch(()=>{});
+  }
 }
 
 function showIncomingCall(data){
@@ -1733,6 +1851,8 @@ function acceptCall(fromId,callId,type,chatId){
   if(FB_READY&&DB_FB){
     DB_FB.ref('pulse/calls/'+fromId+'/answer').set({callId,accepted:true,ts:Date.now()}).catch(()=>{});
   }
+  // Track active call ID for cross-device end detection
+  window._activeCallId=callId||null;
   // Find or create the chat with the caller
   if(chatId){
     AC=chatId;
@@ -1749,6 +1869,10 @@ function acceptCall(fromId,callId,type,chatId){
     } else { openChat(chatId); }
   }
   callType=type;callSecs=0;callMuted=false;callConnected=true;
+  if(type==='video'){
+    document.getElementById('csVids').classList.add('on');
+    document.getElementById('csCamWrap').style.display='flex';
+  }
   const c=gChats()[AC]||{},us=gUsers();
   const nm=us[fromId]?.name||'Caller';
   document.getElementById('csName').textContent=nm;
@@ -1758,9 +1882,14 @@ function acceptCall(fromId,callId,type,chatId){
   document.getElementById('callScr').classList.add('on');
   clearInterval(callTimer);
   callTimer=setInterval(()=>{callSecs++;const m=Math.floor(callSecs/60),s=callSecs%60;document.getElementById('csTimer').textContent=(m<10?'0':'')+m+':'+(s<10?'0':'')+s;},1000);
-  // Request mic/camera
-  const constraints=type==='video'?{video:{facingMode:'user'},audio:true}:{audio:true,video:false};
-  navigator.mediaDevices.getUserMedia(constraints).then(stream=>{localStream=stream;}).catch(()=>{});
+  // Request mic/camera and start WebRTC as answerer
+  const constraints=type==='video'?{video:{facingMode:'user',width:{ideal:640},height:{ideal:480}},audio:true}:{audio:true,video:false};
+  navigator.mediaDevices.getUserMedia(constraints).then(stream=>{
+    localStream=stream;
+    if(type==='video'){showLocalVideo(stream);}
+    // Start WebRTC as answerer
+    if(window._activeCallId) startWebRTC(stream, false, window._activeCallId);
+  }).catch(e=>console.warn('getUserMedia error:',e));
 }
 
 function declineCall(fromId,callId){
@@ -1775,34 +1904,41 @@ function connectCall(){
   if(!document.getElementById('callScr').classList.contains('on'))return;
   callConnected=true;stopRingTone();
   document.getElementById('csRing').classList.remove('ringing');
-  document.getElementById('csStatus').textContent=callType==='video'?'📹 Connected — use speakerphone':'📞 Connected — use speakerphone';
+  document.getElementById('csStatus').textContent=callType==='video'?'📹 Video Call':'📞 Voice Call';
   document.getElementById('csTimer').style.display='block';
   clearInterval(callTimer);
   callTimer=setInterval(()=>{callSecs++;const m=Math.floor(callSecs/60),s=callSecs%60;document.getElementById('csTimer').textContent=(m<10?'0':'')+m+':'+(s<10?'0':'')+s},1000);
-  // Note: peer-to-peer audio requires a signaling server (WebRTC).
-  // This app uses Firebase for messaging - voice/video is coming in next update.
-  toast('Call connected — full WebRTC audio coming soon','info');
+  // Call connected - both sides can now see each other's camera
 }
 function endCall(){
   clearInterval(callTimer);callTimer=null;stopRingTone();
-  if(localStream){localStream.getTracks().forEach(t=>t.stop());localStream=null}
-  // Remove Firebase answer listener
+  if(localStream){localStream.getTracks().forEach(t=>t.stop());localStream=null;}
   if(FB_READY&&DB_FB&&ME){
+    // Remove all call-related Firebase nodes
+    DB_FB.ref('pulse/calls/'+ME.id).remove().catch(()=>{});
     DB_FB.ref('pulse/calls/'+ME.id+'/answer').off();
-    // Remove outgoing call notification if still ringing
+    // Remove shared call status (signals other side to close)
+    if(window._activeCallId){
+      DB_FB.ref('pulse/callStatus/'+window._activeCallId).remove().catch(()=>{});
+      DB_FB.ref('pulse/callStatus/'+window._activeCallId).off();
+      window._activeCallId=null;
+    }
+    // Remove outgoing call notification
     if(window._outgoingCallId&&AC){
       const c=gChats()[AC],us=gUsers(),other=chatOther(c,us);
       if(other)DB_FB.ref('pulse/calls/'+other.id).remove().catch(()=>{});
+      window._outgoingCallId=null;
     }
-    window._outgoingCallId=null;
   }
   document.getElementById('csLocalVid').innerHTML='📷<div class="cs-vid-lbl">You</div>';
   document.getElementById('csRing').classList.remove('ringing');
   document.getElementById('callScr').classList.remove('on');
   const dur=callSecs>0?Math.floor(callSecs/60)+':'+(callSecs%60<10?'0':'')+callSecs%60:null;
-  if(AC&&callSecs>0)push({type:'text',text:`${callType==='video'?'📹 Video':'📞 Voice'} call ended · ${dur}`});
-  else if(AC&&!callConnected)push({type:'text',text:`${callType==='video'?'📹 Video':'📞 Voice'} call missed`});
-  callSecs=0;callConnected=false;toast('Call ended','info');
+  const wasConnected=callConnected;
+  callSecs=0;callConnected=false;
+  if(AC&&wasConnected&&dur)push({type:'text',text:(callType==='video'?'📹 Video':'📞 Voice')+' call ended · '+dur});
+  else if(AC&&!wasConnected)push({type:'text',text:(callType==='video'?'📹 Video':'📞 Voice')+' call missed'});
+  toast('Call ended','info');
 }
 function toggleCallMic(){callMuted=!callMuted;if(localStream)localStream.getAudioTracks().forEach(t=>t.enabled=!callMuted);document.getElementById('csMic').textContent=callMuted?'🔇':'🎤';document.getElementById('csMic').classList.toggle('muted',callMuted);toast(callMuted?'🔇 Muted':'🎤 Unmuted','info')}
 function toggleCallCam(){callCamOff=!callCamOff;if(localStream)localStream.getVideoTracks().forEach(t=>t.enabled=!callCamOff);document.getElementById('csCam').textContent=callCamOff?'📵':'📹';toast(callCamOff?'📵 Camera off':'📹 Camera on','info')}
@@ -2034,42 +2170,57 @@ function updateRptPrev(){const txs=getFilteredTxs(),inc=txs.filter(t=>t.type==='
 function doCSV(){doCSVFromTxs(getFilteredTxs());closeOv('reportOv')}
 function doPDF(){doPDFFromTxs(getFilteredTxs());closeOv('reportOv')}
 function doCSVFromTxs(txs){const rows=[['#','Date','Type','Description','Category','Amount','Account','Note']];txs.forEach((t,i)=>rows.push([i+1,t.date,t.type,t.desc,t.cat,t.amount.toFixed(2),t.acc,t.note||'']));const csv=rows.map(r=>r.map(v=>`"${String(v).replace(/"/g,'""')}"`).join(',')).join('\r\n');const a=document.createElement('a');a.href=URL.createObjectURL(new Blob(['\ufeff'+csv],{type:'text/csv;charset=utf-8'}));a.download=`pulse-report-${today()}.csv`;document.body.appendChild(a);a.click();document.body.removeChild(a);toast('CSV downloaded!','ok')}
-function doPDFFromTxs(txs){let bal=0;const rows=txs.map((t,i)=>{if(t.type==='income')bal+=t.amount;else bal-=t.amount;return`<tr><td>${i+1}</td><td>${t.date}</td><td>${esc(t.desc)}</td><td style="color:#e53e3e">${t.type==='expense'?t.amount.toFixed(2):'—'}</td><td style="color:#276749">${t.type==='income'?t.amount.toFixed(2):'—'}</td><td style="font-weight:700;color:${bal>=0?'#276749':'#e53e3e'}">${bal.toFixed(2)}</td></tr>`}).join('');const inc=txs.filter(t=>t.type==='income').reduce((s,t)=>s+t.amount,0),exp=txs.filter(t=>t.type==='expense').reduce((s,t)=>s+t.amount,0);const html=`<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width"><title>PULSE Report</title><style>*{box-sizing:border-box}body{font-family:system-ui,sans-serif;margin:16px;color:#333;font-size:12px}h1{font-size:20px;font-weight:800;color:#0ea5e9;margin:0 0 3px}p{color:#888;margin:0 0 14px;font-size:11px}.s{display:flex;gap:8px;margin-bottom:16px}.sc{flex:1;border:1px solid #e2e8f0;border-radius:8px;padding:10px;text-align:center}.sl{font-size:9px;color:#94a3b8;text-transform:uppercase;margin-bottom:3px}.sv{font-size:16px;font-weight:700}table{width:100%;border-collapse:collapse}th{background:#f0f4f8;padding:6px;text-align:left;font-size:10px;text-transform:uppercase;color:#94a3b8}td{padding:6px;border-bottom:1px solid #f0f4f8;font-size:11px}.ft{margin-top:14px;font-size:10px;color:#94a3b8}@media print{body{margin:8mm}}</style></head><body><h1>⚡ PULSE Finance Report</h1><p>Generated: ${new Date().toLocaleString()} · ${txs.length} records</p><div class="s"><div class="sc"><div class="sl">Income</div><div class="sv" style="color:#276749">$${inc.toFixed(2)}</div></div><div class="sc"><div class="sl">Expenses</div><div class="sv" style="color:#e53e3e">$${exp.toFixed(2)}</div></div><div class="sc"><div class="sl">Net Balance</div><div class="sv" style="color:${inc-exp>=0?'#276749':'#e53e3e'}">$${(inc-exp).toFixed(2)}</div></div></div><table><thead><tr><th>#</th><th>Date</th><th>Description</th><th>Debit</th><th>Credit</th><th>Balance</th></tr></thead><tbody>${rows}</tbody></table><div class="ft">Generated by PULSE · ${new Date().toLocaleDateString()}</div>
-<!-- Firebase Setup Modal -->
-<div class="ov" id="fbSetupOv" style="z-index:9500">
- <div class="modal" style="max-width:520px">
-  <div style="text-align:center;margin-bottom:16px">
-   <div style="font-size:40px;margin-bottom:8px">🔥</div>
-   <div class="mttl" style="font-size:20px">Firebase Connected!</div>
-   <p style="font-size:13px;color:var(--green);margin-top:6px;font-weight:700">Project: pulse-chat-messenger</p>
-   <p style="font-size:12px;color:var(--t2);margin-top:4px;line-height:1.6">Your app is connected to Firebase. You can also switch to a different project below.</p>
-  </div>
-  <div style="background:var(--bg3);border-radius:12px;padding:14px;margin-bottom:14px;font-size:12px;color:var(--t2);line-height:1.8">
-   <b style="color:var(--t)">How to get your config:</b><br>
-   1. Go to <a href="https://console.firebase.google.com" target="_blank" style="color:var(--p)">console.firebase.google.com</a><br>
-   2. Create a new project (free)<br>
-   3. Click ⚙️ Project Settings → Your Apps → Web App (&lt;/&gt;)<br>
-   4. Copy the <b>firebaseConfig</b> object<br>
-   5. Also enable: <b>Authentication → Email/Password</b><br>
-   6. And: <b>Realtime Database → Create database</b> (test mode)
-  </div>
-  <div class="fg"><label class="fl">Paste your firebaseConfig JSON here</label><textarea class="fi" id="fbConfigInput" rows="8" style="font-family:'DM Mono',monospace;font-size:11px;resize:vertical" placeholder='{
-  "apiKey": "AIzaSy...",
-  "authDomain": "your-project.firebaseapp.com",
-  "databaseURL": "https://your-project-default-rtdb.firebaseio.com",
-  "projectId": "your-project",
-  "storageBucket": "your-project.appspot.com",
-  "messagingSenderId": "123456789",
-  "appId": "1:123:web:abc"
-}'></textarea></div>
-  <div class="macts">
-   <button class="btnc" onclick="skipFbSetup()">Use Offline Mode</button>
-   <button class="btnp" onclick="saveFbConfig()">Connect & Save 🔥</button>
-  </div>
-  <p style="text-align:center;font-size:11px;color:var(--t3);margin-top:10px">Your config is saved in your browser. All your data will sync to the cloud.</p>
- </div>
-</div>
-</body></html>`;const blob=new Blob([html],{type:'text/html'});const url=URL.createObjectURL(blob);const w=window.open(url,'_blank');if(!w){const a=document.createElement('a');a.href=url;a.download=`pulse-report-${today()}.html`;document.body.appendChild(a);a.click();document.body.removeChild(a)}setTimeout(()=>URL.revokeObjectURL(url),5000);toast('📄 Tap Share → Save as PDF','ok')}
+function doPDFFromTxs(txs){
+  let bal=0;
+  const rows=txs.map((t,i)=>{
+    if(t.type==='income')bal+=t.amount;else bal-=t.amount;
+    return '<tr><td>'+(i+1)+'</td><td>'+t.date+'</td><td>'+esc(t.desc)+'</td>'
+      +'<td style="color:#e53e3e">'+(t.type==='expense'?t.amount.toFixed(2):'—')+'</td>'
+      +'<td style="color:#276749">'+(t.type==='income'?t.amount.toFixed(2):'—')+'</td>'
+      +'<td style="font-weight:700;color:'+(bal>=0?'#276749':'#e53e3e')+'">'+bal.toFixed(2)+'</td></tr>';
+  }).join('');
+  const inc=txs.filter(t=>t.type==='income').reduce((s,t)=>s+t.amount,0);
+  const exp=txs.filter(t=>t.type==='expense').reduce((s,t)=>s+t.amount,0);
+  const net=inc-exp;
+  const dateStr=new Date().toLocaleDateString('en-US',{year:'numeric',month:'long',day:'numeric'});
+  const html='<!DOCTYPE html><html><head><meta charset="UTF-8">'
+    +'<meta name="viewport" content="width=device-width,initial-scale=1">'
+    +'<title>Finance Report</title>'
+    +'<style>*{box-sizing:border-box;margin:0;padding:0}'
+    +'body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif;padding:20px;color:#1a202c;font-size:13px}'
+    +'h1{font-size:22px;font-weight:800;color:#0ea5e9;margin-bottom:2px}'
+    +'.sub{color:#718096;font-size:12px;margin-bottom:18px}'
+    +'.summary{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-bottom:18px}'
+    +'.scard{border:1px solid #e2e8f0;border-radius:10px;padding:12px;text-align:center}'
+    +'.slabel{font-size:10px;color:#94a3b8;text-transform:uppercase;letter-spacing:.05em;font-weight:700;margin-bottom:4px}'
+    +'.sval{font-size:18px;font-weight:800}'
+    +'table{width:100%;border-collapse:collapse;font-size:12px}'
+    +'thead{background:#f7fafc}'
+    +'th{padding:8px 10px;text-align:left;font-size:10px;text-transform:uppercase;color:#94a3b8;letter-spacing:.05em;border-bottom:2px solid #e2e8f0}'
+    +'td{padding:8px 10px;border-bottom:1px solid #f0f4f8}'
+    +'tr:last-child td{border-bottom:none}'
+    +'tr:hover td{background:#f7fafc}'
+    +'.footer{margin-top:20px;text-align:center;font-size:11px;color:#94a3b8}'
+    +'@media print{body{padding:10mm}.footer{position:fixed;bottom:0;width:100%}}'
+    +'</style></head><body>'
+    +'<h1>⚡ PULSE Finance Report</h1>'
+    +'<div class="sub">Generated '+dateStr+' · '+txs.length+' transactions</div>'
+    +'<div class="summary">'
+    +'<div class="scard"><div class="slabel">Total Income</div><div class="sval" style="color:#276749">$'+inc.toFixed(2)+'</div></div>'
+    +'<div class="scard"><div class="slabel">Total Expenses</div><div class="sval" style="color:#e53e3e">$'+exp.toFixed(2)+'</div></div>'
+    +'<div class="scard"><div class="slabel">Net Balance</div><div class="sval" style="color:'+(net>=0?'#276749':'#e53e3e')+'">$'+net.toFixed(2)+'</div></div>'
+    +'</div>'
+    +'<table><thead><tr><th>#</th><th>Date</th><th>Description</th><th>Debit</th><th>Credit</th><th>Balance</th></tr></thead>'
+    +'<tbody>'+rows+'</tbody></table>'
+    +'<div class="footer">PULSE Finance Report · '+dateStr+'</div>'
+    +'</body></html>';
+  const blob=new Blob([html],{type:'text/html'});
+  const url=URL.createObjectURL(blob);
+  const w=window.open(url,'_blank');
+  if(!w){const a=document.createElement('a');a.href=url;a.download='pulse-report-'+today()+'.html';document.body.appendChild(a);a.click();document.body.removeChild(a);}
+  setTimeout(()=>URL.revokeObjectURL(url),8000);
+  toast('PDF: tap Share → Save as PDF','ok');
+}
 function sendRptChat(){if(!AC){toast('Open a chat first','err');closeOv('reportOv');setSec('chat');return}const txs=getFilteredTxs(),inc=txs.filter(t=>t.type==='income').reduce((s,t)=>s+t.amount,0),exp=txs.filter(t=>t.type==='expense').reduce((s,t)=>s+t.amount,0);push({type:'report',title:`Finance Report (${document.getElementById('rptFrom').value} – ${document.getElementById('rptTo').value})`,rows:txs.slice(0,20),totInc:inc,totExp:exp});closeOv('reportOv');setSec('chat');toast('Report sent!','ok')}
 
 /* ═══ HELPERS ═══ */
