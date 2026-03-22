@@ -826,10 +826,13 @@ function setupFirebaseSync(){
   const usRef=DB_FB.ref('pulse/p3_users');
   _fbListeners.users=usRef.on('value',snap=>{
     if(!snap.exists())return;
-    const val=snap.val();
-    localStorage.setItem('p3_users',JSON.stringify(val));
+    const cloud=snap.val();
+    const local=DB.g('p3_users',{});
+    // Always merge: cloud wins for shared data, but never drop local users
+    const merged=Object.assign({},local,cloud);
+    localStorage.setItem('p3_users',JSON.stringify(merged));
     updateDockAv();renderChatList();
-    if(AC)renderMsgs(); // re-render so names resolve
+    if(AC)updateChatSub();
   });
 
   // ── Sync chats ──
@@ -1052,7 +1055,8 @@ function doGoogleSignIn(){
         seen: Date.now()
       };
       us[u.id] = u;
-      DB.s('p3_users', us);
+      if(FB_READY&&DB_FB) DB_FB.ref('pulse/p3_users/'+u.id).set(u).catch(()=>{});
+      localStorage.setItem('p3_users', JSON.stringify(us));
       toast('Welcome, '+gName+'! 👋', 'ok');
     } else {
       // Existing user — update photo and online status
@@ -1060,7 +1064,8 @@ function doGoogleSignIn(){
       u.seen = Date.now();
       if(gPhoto && !u.av) u.av = gPhoto;
       us[u.id] = u;
-      DB.s('p3_users', us);
+      if(FB_READY&&DB_FB) DB_FB.ref('pulse/p3_users/'+u.id).set(u).catch(()=>{});
+      localStorage.setItem('p3_users', JSON.stringify(us));
     }
     loginAs(u);
   }).catch(err => {
@@ -1096,7 +1101,7 @@ function doReg(){
     const us=gUsers();
     if(us[un]){showAErr('Username taken');if(cbtn){cbtn.textContent='Create Account →';cbtn.disabled=false;}return;}
     const u={id:un,name:nm,username:un,about:ab,av:regAv,col:cFor(un),online:true,seen:Date.now()};
-    us[un]=u; DB.s('p3_users',us); loginAs(u);
+    us[un]=u; if(FB_READY&&DB_FB) DB_FB.ref('pulse/p3_users/'+un).set(u).catch(()=>{}); localStorage.setItem('p3_users',JSON.stringify(us)); loginAs(u);
   }
 
   if(FB_READY && AUTH){
@@ -1124,7 +1129,7 @@ function doLogin(){
     const us=gUsers();
     const u=us[uid]||us[un];
     if(!u){showAErr('Account not found — please register first');if(btn){btn.textContent='Sign In →';btn.disabled=false;}return;}
-    u.online=true;u.seen=Date.now();us[u.id]=u;DB.s('p3_users',us);loginAs(u);
+    u.online=true;u.seen=Date.now();us[u.id]=u; if(FB_READY&&DB_FB) DB_FB.ref('pulse/p3_users/'+u.id).update({online:true,seen:Date.now()}).catch(()=>{}); localStorage.setItem('p3_users',JSON.stringify(us)); loginAs(u);
   }
 
   if(FB_READY && AUTH){
@@ -1161,8 +1166,23 @@ function loginAs(u){
   if(FB_READY && DB_FB){
     // Pull latest data from Firebase then start app
     Promise.all([
-      DB_FB.ref('pulse/p3_users').once('value').then(s=>{if(s.exists())localStorage.setItem('p3_users',JSON.stringify(s.val()));}).catch(()=>{}),
-      DB_FB.ref('pulse/p3_chats').once('value').then(s=>{if(s.exists())localStorage.setItem('p3_chats',JSON.stringify(s.val()));}).catch(()=>{}),
+      // MERGE users - never overwrite (each device only knows its own users locally)
+      DB_FB.ref('pulse/p3_users').once('value').then(s=>{
+        if(s.exists()){
+          const cloud=s.val();
+          const local=DB.g('p3_users',{});
+          // Cloud is authoritative - merge cloud into local
+          const merged=Object.assign({},local,cloud);
+          localStorage.setItem('p3_users',JSON.stringify(merged));
+        }
+      }).catch(()=>{}),
+      DB_FB.ref('pulse/p3_chats').once('value').then(s=>{
+        if(s.exists()){
+          const cloud=s.val();
+          const local=DB.g('p3_chats',{});
+          localStorage.setItem('p3_chats',JSON.stringify(Object.assign({},local,cloud)));
+        }
+      }).catch(()=>{}),
       DB_FB.ref('pulse/p3_tx').once('value').then(s=>{if(s.exists()){const v=s.val();localStorage.setItem('p3_tx',JSON.stringify(Array.isArray(v)?v:Object.values(v||{})));} }).catch(()=>{}),
       DB_FB.ref('pulse/p3_buds').once('value').then(s=>{if(s.exists())localStorage.setItem('p3_buds',JSON.stringify(s.val()));}).catch(()=>{}),
     ]).finally(()=>{ initApp(); setupFirebaseSync(); });
@@ -1176,7 +1196,7 @@ function doLogout(){
   Object.values(_fbListeners).forEach(off=>{try{off()}catch(e){}});
   _fbListeners={};
   if(FB_READY && AUTH){ AUTH.signOut().catch(()=>{}); }
-  const us=gUsers();if(us[ME?.id]){us[ME.id].online=false;us[ME.id].seen=Date.now();DB.s('p3_users',us);}
+  const us=gUsers();if(us[ME?.id]){us[ME.id].online=false;us[ME.id].seen=Date.now(); if(FB_READY&&DB_FB) DB_FB.ref('pulse/p3_users/'+ME.id).update({online:false,seen:Date.now()}).catch(()=>{}); localStorage.setItem('p3_users',JSON.stringify(us));}
   localStorage.removeItem('p3_sess');ME=null;AC=null;
   document.getElementById('app').style.display='none';
   document.getElementById('authWall').style.display='flex';
@@ -1189,13 +1209,14 @@ function initApp(){
   seedFin();renderChatList();renderNotifList();setSec('chat');
   if('Notification' in window&&Notification.permission==='default')Notification.requestPermission();
   setInterval(()=>{
+    if(!ME?.id) return;
     const us=gUsers();
-    if(us[ME?.id]){
-      us[ME.id].online=true;us[ME.id].seen=Date.now();
+    if(us[ME.id]){
+      us[ME.id].online=true; us[ME.id].seen=Date.now();
       localStorage.setItem('p3_users',JSON.stringify(us));
-      // Also update Firebase so other users see correct online status
-      if(FB_READY&&DB_FB) DB_FB.ref('pulse/p3_users/'+ME.id).update({online:true,seen:Date.now()}).catch(()=>{});
     }
+    // Update ONLY own presence - never touch other users
+    if(FB_READY&&DB_FB) DB_FB.ref('pulse/p3_users/'+ME.id).update({online:true,seen:Date.now()}).catch(()=>{});
   },15000);
   setInterval(()=>{renderChatList();if(AC)updateChatSub()},5000);
 }
@@ -1431,7 +1452,7 @@ function push(data){
       ch[AC].upd=Date.now();
       ch[AC].lastMsg=preview;
       ch[AC].lastUid=ME.id;
-      DB_FB.ref('pulse/p3_chats/'+AC).set(ch[AC]).catch(()=>{});
+      DB_FB.ref('pulse/p3_chats/'+AC).update({upd:Date.now(),lastMsg:preview,lastUid:ME.id}).catch(()=>{});
       DB.s('p3_chats',ch,true);
     }
     // Push call notification to other user via Firebase
@@ -1672,8 +1693,21 @@ function acceptCall(fromId,callId,type,chatId){
   if(FB_READY&&DB_FB){
     DB_FB.ref('pulse/calls/'+fromId+'/answer').set({callId,accepted:true,ts:Date.now()}).catch(()=>{});
   }
-  // Switch to the chat and show connected call
-  if(chatId){AC=chatId;openChat(chatId);}
+  // Find or create the chat with the caller
+  if(chatId){
+    AC=chatId;
+    // Make sure we have this chat loaded
+    if(FB_READY&&DB_FB){
+      DB_FB.ref('pulse/p3_chats/'+chatId).once('value').then(snap=>{
+        if(snap.exists()){
+          const ch=DB.g('p3_chats',{});
+          ch[chatId]=snap.val();
+          localStorage.setItem('p3_chats',JSON.stringify(ch));
+        }
+        openChat(chatId);
+      }).catch(()=>openChat(chatId));
+    } else { openChat(chatId); }
+  }
   callType=type;callSecs=0;callMuted=false;callConnected=true;
   const c=gChats()[AC]||{},us=gUsers();
   const nm=us[fromId]?.name||'Caller';
@@ -1748,11 +1782,16 @@ function renderPick(mode){
   if(!list.length){el.innerHTML=`<div style="text-align:center;padding:20px;color:var(--t3);font-size:13px">${q?'No users found':'No other users registered'}</div>`;return}
   el.innerHTML=list.map(u=>`<div class="pkit${selIds.includes(u.id)?' sel':''}" onclick="${mode==='nc'?`startDM('${u.id}')`:mode==='grp'?`togGM('${u.id}')`:mode==='addMem'?`togAM('${u.id}')`:''}">${avH(u,40,11)}<div><div class="pknm">${esc(u.name)}</div><div class="pksb">@${u.username||u.id}${u.online?' · 🟢':''}</div></div>${mode!=='nc'?`<div class="pkchk">${selIds.includes(u.id)?'✓':''}</div>`:''}</div>`).join('');
 }
-function startDM(uid2){closeOv('newChatOv');const ch=gChats();for(const c of Object.values(ch)){if(c.type==='dm'&&((c.u1===ME.id&&c.u2===uid2)||(c.u1===uid2&&c.u2===ME.id))){openChat(c.id);return}}const id='dm_'+[ME.id,uid2].sort().join('_');ch[id]={id,type:'dm',u1:ME.id,u2:uid2,members:[ME.id,uid2],cr:Date.now()};DB.s('p3_chats',ch);renderChatList();openChat(id)}
+function startDM(uid2){closeOv('newChatOv');const ch=gChats();for(const c of Object.values(ch)){if(c.type==='dm'&&((c.u1===ME.id&&c.u2===uid2)||(c.u1===uid2&&c.u2===ME.id))){openChat(c.id);return}}const id='dm_'+[ME.id,uid2].sort().join('_');ch[id]={id,type:'dm',u1:ME.id,u2:uid2,members:[ME.id,uid2],cr:Date.now()};
+  localStorage.setItem('p3_chats',JSON.stringify(ch));
+  if(FB_READY&&DB_FB) DB_FB.ref('pulse/p3_chats/'+id).set(ch[id]).catch(()=>{});
+  renderChatList();openChat(id)}
 function grpStep2(){const nm=document.getElementById('gN').value.trim();if(!nm){toast('Enter group name','err');return}grpD.name=nm;grpD.desc=document.getElementById('gD').value.trim();closeOv('grpS1Ov');openOv('grpS2Ov');renderPick('grp');renderGChips()}
 function togGM(id){const i=grpD.members.indexOf(id);if(i>=0)grpD.members.splice(i,1);else grpD.members.push(id);renderPick('grp');renderGChips()}
 function renderGChips(){const us=gUsers();document.getElementById('grpChips').innerHTML=grpD.members.map(id=>{const u=us[id];return`<div class="chip">${esc(u?.name||id)}<button onclick="togGM('${id}')">×</button></div>`}).join('')}
-function createGroup(){closeOv('grpS2Ov');const id='grp_'+uid();const ch=gChats();ch[id]={id,type:'grp',name:grpD.name,desc:grpD.desc,members:[ME.id,...grpD.members],admins:[ME.id],cr:Date.now()};DB.s('p3_chats',ch);renderChatList();openChat(id);const msgs=gMsgs(id);msgs.push({id:uid(),ts:Date.now(),uid:ME.id,rb:[ME.id],type:'text',text:`👥 Group "${grpD.name}" created`});DB.s('p3_m_'+id,msgs);renderMsgs();toast(`"${grpD.name}" created!`,'ok')}
+function createGroup(){closeOv('grpS2Ov');const id='grp_'+uid();const ch=gChats();ch[id]={id,type:'grp',name:grpD.name,desc:grpD.desc,members:[ME.id,...grpD.members],admins:[ME.id],cr:Date.now()};localStorage.setItem('p3_chats',JSON.stringify(ch));
+  if(FB_READY&&DB_FB) DB_FB.ref('pulse/p3_chats/'+id).set(ch[id]).catch(()=>{});
+  renderChatList();openChat(id);const msgs=gMsgs(id);msgs.push({id:uid(),ts:Date.now(),uid:ME.id,rb:[ME.id],type:'text',text:`👥 Group "${grpD.name}" created`});DB.s('p3_m_'+id,msgs);renderMsgs();toast(`"${grpD.name}" created!`,'ok')}
 function openAddMems(){addMemSel=[];document.getElementById('addMemSrch').value='';document.getElementById('addMemChips').innerHTML='';renderPick('addMem');openOv('addMemOv')}
 function togAM(id){const i=addMemSel.indexOf(id);if(i>=0)addMemSel.splice(i,1);else addMemSel.push(id);renderPick('addMem');document.getElementById('addMemChips').innerHTML=addMemSel.map(id=>{const u=gUsers()[id];return`<div class="chip">${esc(u?.name||id)}<button onclick="togAM('${id}')">×</button></div>`}).join('')}
 function doAddMems(){if(!addMemSel.length){closeOv('addMemOv');return}const ch=gChats(),c=ch[AC];if(!c)return;const nms=addMemSel.filter(id=>!c.members.includes(id));c.members=[...c.members,...nms];DB.s('p3_chats',ch);const us=gUsers(),msgs=gMsgs(AC);nms.forEach(id=>msgs.push({id:uid(),ts:Date.now(),uid:ME.id,rb:[ME.id],type:'text',text:`➕ ${us[id]?.name||id} added to group`}));DB.s('p3_m_'+AC,msgs);closeOv('addMemOv');renderMsgs();renderChatList();updateChatSub();if(document.getElementById('infoPanel').classList.contains('on'))openInfo();toast(`${nms.length} member(s) added!`,'ok')}
@@ -1790,8 +1829,8 @@ function openFbSetup(){
   closeOv('myProfOv');
   document.getElementById('fbSetupOv')?.classList.add('on');
 }
-function chgMyAv(inp){const f=inp.files[0];if(!f)return;const r=new FileReader();r.onload=e=>{const us=gUsers();ME.av=e.target.result;us[ME.id]=ME;DB.s('p3_users',us);document.getElementById('myProfAv').innerHTML=avH(ME,84,20);updateDockAv();renderChatList();if(AC)renderMsgs()};r.readAsDataURL(f)}
-function saveMyProf(){const n=document.getElementById('pN').value.trim(),ab=document.getElementById('pAb').value.trim();if(!n){toast('Name required','err');return}const us=gUsers();ME.name=n;ME.about=ab;us[ME.id]=ME;DB.s('p3_users',us);updateDockAv();renderChatList();if(AC)renderMsgs();closeOv('myProfOv');toast('Profile saved ✓','ok')}
+function chgMyAv(inp){const f=inp.files[0];if(!f)return;const r=new FileReader();r.onload=e=>{const us=gUsers();ME.av=e.target.result;us[ME.id]=ME; if(FB_READY&&DB_FB) DB_FB.ref('pulse/p3_users/'+ME.id).set(ME).catch(()=>{}); localStorage.setItem('p3_users',JSON.stringify(us));document.getElementById('myProfAv').innerHTML=avH(ME,84,20);updateDockAv();renderChatList();if(AC)renderMsgs()};r.readAsDataURL(f)}
+function saveMyProf(){const n=document.getElementById('pN').value.trim(),ab=document.getElementById('pAb').value.trim();if(!n){toast('Name required','err');return}const us=gUsers();ME.name=n;ME.about=ab;us[ME.id]=ME; if(FB_READY&&DB_FB) DB_FB.ref('pulse/p3_users/'+ME.id).set(ME).catch(()=>{}); localStorage.setItem('p3_users',JSON.stringify(us));updateDockAv();renderChatList();if(AC)renderMsgs();closeOv('myProfOv');toast('Profile saved ✓','ok')}
 
 
 function dlFile(msgId){
@@ -2024,17 +2063,34 @@ function triggerAuthCheck(){
         DB_FB.ref('pulse/p3_users').orderByChild('googleUid').equalTo(firebaseUid).once('value')
           .then(snap=>{
             if(snap.exists()){const u=Object.values(snap.val())[0];localStorage.setItem('p3_sess',u.id);loginAs(u);}
-            else{const sid=localStorage.getItem('p3_sess');if(sid){const us=DB.g('p3_users',{});if(us[sid])loginAs(us[sid]);}}
+            else{
+              // Google user not yet in DB - they need to re-register
+              console.warn('Google user not in DB');
+              localStorage.removeItem('p3_sess');
+            }
           })
-          .catch(()=>{const sid=localStorage.getItem('p3_sess');if(sid){const us=DB.g('p3_users',{});if(us[sid])loginAs(us[sid]);}});
+          .catch(()=>{
+            const sid=localStorage.getItem('p3_sess');
+            if(sid){const us=DB.g('p3_users',{});const u=us[sid];if(u&&u.id)loginAs(u);}
+          });
       } else if(DB_FB){
         const un=(firebaseUser.email||'').replace('@pulse.app','');
         DB_FB.ref('pulse/p3_users/'+un).once('value')
           .then(snap=>{
-            if(snap.exists()){const u=snap.val();localStorage.setItem('p3_sess',u.id);loginAs(u);}
-            else{const sid=localStorage.getItem('p3_sess');if(sid){const us=DB.g('p3_users',{});if(us[sid])loginAs(us[sid]);}}
+            if(snap.exists()){
+              const u=snap.val();
+              if(u&&u.id){localStorage.setItem('p3_sess',u.id);loginAs(u);}
+            } else {
+              // User not in Firebase yet - could be new device
+              // Try local cache
+              const sid=localStorage.getItem('p3_sess');
+              if(sid){const us=DB.g('p3_users',{});const u=us[sid];if(u&&u.id)loginAs(u);}
+            }
           })
-          .catch(()=>{const sid=localStorage.getItem('p3_sess');if(sid){const us=DB.g('p3_users',{});if(us[sid])loginAs(us[sid]);}});
+          .catch(()=>{
+            const sid=localStorage.getItem('p3_sess');
+            if(sid){const us=DB.g('p3_users',{});const u=us[sid];if(u&&u.id)loginAs(u);}
+          });
       } else {
         const sid=localStorage.getItem('p3_sess');
         if(sid){const us=DB.g('p3_users',{});if(us[sid])loginAs(us[sid]);}
