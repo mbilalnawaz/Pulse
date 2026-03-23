@@ -266,14 +266,26 @@ button{cursor:pointer;border:none;background:none}
 @keyframes rwv{from{height:20%}to{height:90%}}
 
 /* CALL SCREEN */
-.callscr{position:fixed;inset:0;background:linear-gradient(160deg,#071022,#0d1f3c,#071022);z-index:8000;display:none;flex-direction:column;align-items:center;justify-content:center;overflow:hidden}
+.callscr{position:fixed;inset:0;background:#000;z-index:8000;display:none;flex-direction:column;overflow:hidden}
 .callscr.on{display:flex}
-.cs-bg{position:absolute;inset:0;overflow:hidden;pointer-events:none}
+/* Audio call background */
+.cs-bg{position:absolute;inset:0;background:linear-gradient(160deg,#071022,#0d1f3c,#071022);pointer-events:none;transition:opacity .5s}
+.callscr.video-active .cs-bg{opacity:0}
 .cs-blob{position:absolute;border-radius:50%;filter:blur(80px);opacity:.15;animation:blob 8s infinite alternate}
 .cs-blob:nth-child(1){width:350px;height:350px;background:var(--p);top:-80px;left:-80px}
 .cs-blob:nth-child(2){width:300px;height:300px;background:var(--purple);bottom:-60px;right:-60px;animation-delay:2s}
 @keyframes blob{from{transform:translate(0,0) scale(1)}to{transform:translate(20px,15px) scale(1.1)}}
-.cs-av-wrap{position:relative;margin-bottom:16px;z-index:1}
+/* Remote video — FULLSCREEN background */
+#csRemoteVid{position:absolute;inset:0;border-radius:0;background:#111;display:flex;align-items:center;justify-content:center;font-size:48px;z-index:1}
+#csRemoteVid video{position:absolute;inset:0;width:100%;height:100%;object-fit:cover}
+.cs-vid-lbl{position:absolute;bottom:80px;left:16px;font-size:13px;color:rgba(255,255,255,.7);font-weight:600;z-index:10;background:rgba(0,0,0,.3);padding:4px 10px;border-radius:20px}
+/* Local video — small PiP top-right */
+#csLocalVid{position:absolute;top:16px;right:16px;width:100px;height:140px;border-radius:14px;background:rgba(0,0,0,.6);border:2px solid rgba(255,255,255,.2);z-index:10;overflow:hidden;display:flex;align-items:center;justify-content:center;font-size:24px;box-shadow:0 4px 20px rgba(0,0,0,.5)}
+#csLocalVid video{position:absolute;inset:0;width:100%;height:100%;object-fit:cover}
+#csLocalVid .cs-vid-lbl{bottom:4px;left:0;right:0;text-align:center;font-size:10px;padding:2px 6px;background:rgba(0,0,0,.5)}
+/* Audio call info — centered */
+.cs-call-info{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;z-index:2;pointer-events:none}
+.cs-av-wrap{position:relative;margin-bottom:16px}
 .cs-av-ring{width:110px;height:110px;border-radius:50%;display:flex;align-items:center;justify-content:center;position:relative}
 .cs-av-ring.ringing::before,.cs-av-ring.ringing::after{content:'';position:absolute;border-radius:50%;border:2px solid rgba(14,165,233,.4);animation:ring 1.8s infinite}
 .cs-av-ring.ringing::before{width:140px;height:140px;animation-delay:.3s}
@@ -281,21 +293,26 @@ button{cursor:pointer;border:none;background:none}
 @keyframes ring{0%{transform:scale(.85);opacity:1}100%{transform:scale(1.2);opacity:0}}
 .cs-av-inner{width:100px;height:100px;border-radius:50%;object-fit:cover;border:3px solid rgba(255,255,255,.3)}
 .cs-av-ph{width:100px;height:100px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:38px;font-weight:800;color:#fff;border:3px solid rgba(255,255,255,.3)}
-.cs-name{font-size:26px;font-weight:800;color:#fff;letter-spacing:-.5px;z-index:1}
-.cs-status{font-size:14px;color:rgba(255,255,255,.6);margin-top:6px;margin-bottom:8px;z-index:1;font-family:"DM Mono",monospace}
-.cs-timer{font-size:18px;font-family:"DM Mono",monospace;color:rgba(255,255,255,.8);margin-bottom:28px;z-index:1;letter-spacing:.05em;display:none}
-.cs-vids{display:none;gap:12px;margin-bottom:18px;z-index:1}
-.cs-vids.on{display:flex}
-.cs-vid-box{width:90px;height:130px;border-radius:14px;background:rgba(0,0,0,.4);border:1px solid rgba(255,255,255,.12);position:relative;overflow:hidden;display:flex;align-items:center;justify-content:center;font-size:28px}
-.cs-vid-box video{position:absolute;inset:0;width:100%;height:100%;object-fit:cover}
-.cs-vid-lbl{position:absolute;bottom:5px;left:0;right:0;text-align:center;font-size:10px;color:rgba(255,255,255,.7);font-weight:600;z-index:1}
-.cs-btns{display:flex;gap:18px;z-index:1;flex-wrap:wrap;justify-content:center;padding:0 20px}
-.cs-btn-wrap{display:flex;flex-direction:column;align-items:center;gap:5px}
-.csbtn{width:58px;height:58px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:24px;border:none;cursor:pointer;transition:.2s}
-.csbtn:hover{transform:scale(1.08)}
-.csbtn.end{background:var(--red);box-shadow:0 4px 20px rgba(244,63,94,.5)}
-.csbtn.ctl{background:rgba(255,255,255,.15)}.csbtn.muted{background:rgba(244,63,94,.3)}
-.cs-btn-lbl{font-size:10px;color:rgba(255,255,255,.5);font-weight:600}
+.cs-name{font-size:26px;font-weight:800;color:#fff;letter-spacing:-.5px;text-shadow:0 2px 8px rgba(0,0,0,.5)}
+.cs-status{font-size:14px;color:rgba(255,255,255,.7);margin-top:6px;font-family:"DM Mono",monospace}
+.cs-timer{font-size:20px;font-family:"DM Mono",monospace;color:rgba(255,255,255,.9);margin-top:8px;letter-spacing:.05em;display:none;text-shadow:0 2px 8px rgba(0,0,0,.5)}
+
+/* Call buttons — ALWAYS at bottom */
+.cs-btns{
+  position:absolute;bottom:0;left:0;right:0;z-index:20;
+  display:flex;justify-content:center;gap:18px;
+  padding:20px 20px 40px;
+  background:linear-gradient(to top,rgba(0,0,0,.7) 0%,transparent 100%);
+}
+.cs-btn-wrap{display:flex;flex-direction:column;align-items:center;gap:6px}
+.csbtn{width:60px;height:60px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:24px;border:none;cursor:pointer;transition:all .2s;-webkit-tap-highlight-color:transparent}
+.csbtn:active{transform:scale(.92)}
+.csbtn.end{background:var(--red);box-shadow:0 4px 20px rgba(244,63,94,.6)}
+.csbtn.ctl{background:rgba(255,255,255,.2);backdrop-filter:blur(10px)}
+.csbtn.active{background:var(--p);box-shadow:0 4px 16px var(--pg)}
+.csbtn.muted{background:rgba(244,63,94,.4)}
+.cs-btn-lbl{font-size:11px;color:rgba(255,255,255,.7);font-weight:600}
+
 
 /* NOTIFICATION PANEL */
 #notifBd{position:fixed;inset:0;background:rgba(0,0,0,.25);z-index:3999;display:none}
@@ -438,7 +455,7 @@ button{cursor:pointer;border:none;background:none}
 
 /* MOBILE */
 @media(max-width:768px){
-  .dock{width:100%;height:56px;flex-direction:row;bottom:0;top:auto;border-right:none;border-top:1px solid var(--b);padding:6px 2px;justify-content:space-around;gap:0}
+  .dock{width:100%;height:60px;flex-direction:row;bottom:0;top:auto;border-right:none;border-top:1px solid var(--b);padding:4px 8px;justify-content:space-evenly;align-items:center;gap:0}
   .dlogo{display:none}.dsp{display:none}
   .dbtn{width:44px;height:44px;border-radius:11px}
   .dav,.dav-ph{width:30px;height:30px;border-radius:9px}
@@ -639,19 +656,24 @@ button{cursor:pointer;border:none;background:none}
 
 <!-- CALL SCREEN -->
 <div class="callscr" id="callScr">
+ <!-- Remote video fills entire background (hidden for audio calls) -->
+ <div id="csRemoteVid">👤<div class="cs-vid-lbl" id="csVidLbl"></div></div>
+ <!-- Audio call gradient background -->
  <div class="cs-bg"><div class="cs-blob"></div><div class="cs-blob"></div></div>
- <div class="cs-av-wrap"><div class="cs-av-ring ringing" id="csRing"><div id="csAvCont"></div></div></div>
- <div class="cs-name" id="csName"></div>
- <div class="cs-status" id="csStatus">Calling…</div>
- <div class="cs-timer" id="csTimer">00:00</div>
- <div class="cs-vids" id="csVids">
-  <div class="cs-vid-box" id="csLocalVid">📷<div class="cs-vid-lbl">You</div></div>
-  <div class="cs-vid-box" id="csRemoteVid">👤<div class="cs-vid-lbl" id="csVidLbl"></div></div>
+ <!-- Caller info (shown for audio calls, fades for video) -->
+ <div class="cs-call-info" id="csCallInfo">
+  <div class="cs-av-wrap"><div class="cs-av-ring ringing" id="csRing"><div id="csAvCont"></div></div></div>
+  <div class="cs-name" id="csName"></div>
+  <div class="cs-status" id="csStatus">Calling…</div>
+  <div class="cs-timer" id="csTimer">00:00</div>
  </div>
+ <!-- Local video PiP (top-right, shown only for video calls) -->
+ <div id="csLocalVid" style="display:none">📷<div class="cs-vid-lbl">You</div></div>
+ <!-- Buttons always at bottom -->
  <div class="cs-btns">
-  <div class="cs-btn-wrap"><button class="csbtn ctl" id="csMic" onclick="toggleCallMic()">🎤</button><span class="cs-btn-lbl">Mute</span></div>
+  <div class="cs-btn-wrap"><button class="csbtn ctl" id="csMic" onclick="toggleCallMic()">🎤</button><span class="cs-btn-lbl" id="csMicLbl">Mute</span></div>
   <div class="cs-btn-wrap" id="csCamWrap" style="display:none"><button class="csbtn ctl" id="csCam" onclick="toggleCallCam()">📹</button><span class="cs-btn-lbl">Camera</span></div>
-  <div class="cs-btn-wrap"><button class="csbtn ctl" onclick="toggleSpk()">🔊</button><span class="cs-btn-lbl">Speaker</span></div>
+  <div class="cs-btn-wrap"><button class="csbtn ctl" id="csSpeaker" onclick="toggleSpk()">🔈</button><span class="cs-btn-lbl" id="csSpkLbl">Speaker</span></div>
   <div class="cs-btn-wrap"><button class="csbtn end" onclick="endCall()">📵</button><span class="cs-btn-lbl">End</span></div>
  </div>
 </div>
@@ -1023,7 +1045,19 @@ function authTab(t){
   document.getElementById('aerr').style.display='none';
 }
 let regAv='';
-function prevAv(inp){const f=inp.files[0];if(!f)return;const r=new FileReader();r.onload=e=>{const img=document.getElementById('regAimg');img.src=e.target.result;img.style.display='block';document.getElementById('regAvWrap').querySelectorAll('.aic,.alb').forEach(x=>x.style.display='none');regAv=e.target.result};r.readAsDataURL(f)}
+function prevAv(inp){
+  const f=inp.files[0];
+  if(!f)return;
+  const r=new FileReader();
+  r.onload=e=>{
+    regAv=e.target.result;
+    const img=document.getElementById('regAimg');
+    if(img){img.src=regAv;img.style.display='block';}
+    const wrap=document.getElementById('regAvWrap');
+    if(wrap){wrap.querySelectorAll('.aic,.alb').forEach(x=>x.style.display='none');}
+  };
+  r.readAsDataURL(f);
+}
 function showAErr(m){const e=document.getElementById('aerr');e.textContent=m;e.style.display='block'}
 /* ═══ GOOGLE SIGN-IN ═══ */
 function doGoogleSignIn(){
@@ -1390,7 +1424,10 @@ function renderMsg(m,us,chat,all){
     if(m.reply){const o=all.find(x=>x.id===m.reply);if(o){const rs=us[o.uid];body+=`<div class="breply"><div class="breplynm">${o.uid===ME.id?'You':esc(rs?.name||'?')}</div><div class="brepltx">${esc(o.text||'📷 Media')}</div></div>`}}
     if(m.type==='img'){
       if(m.large||!m.data){
-        body+=`<div class="bfile"><div class="bfic">🖼️</div><div><div class="bfnm">${esc(m.fname||'Media')}</div><div class="bfsz">${m.fsz||''}${m.large?' · Too large to display':''}</div></div></div>`;
+        const isVid=m.isVideo||m.ftype?.startsWith('video/')||m.fname?.match(/\.(mp4|mov|avi|webm|mkv)$/i);
+        body+=`<div class="bfile"><div class="bfic">${isVid?'🎥':'🖼️'}</div><div><div class="bfnm">${esc(m.fname||'Media')}</div><div class="bfsz">${m.fsz||''}${m.large?' · Use download link to view':''}${isVid&&m.large?' — video too large for inline display':''}</div></div></div>`;
+      } else if(m.ftype?.startsWith('video/')||m.fname?.match(/\.(mp4|mov|avi|webm)$/i)){
+        body+=`<video class="bimg" src="${m.data}" controls style="max-height:260px" playsinline></video>`;
       } else {
         body+=`<img class="bimg" src="${m.data}" alt="" loading="lazy">`;
       }
@@ -1550,24 +1587,54 @@ function onImg(inp){
   const f=inp.files[0];
   if(!f||!AC){inp.value='';return;}
   inp.value='';closeMenus();
-  if(f.type.startsWith('video/')){
-    if(f.size>50*1024*1024){toast('Video max 50MB','err');return;}
+  const isVideo=f.type.startsWith('video/');
+  // Firebase safe limit: ~6MB raw = ~8MB base64
+  const INLINE_LIMIT=6*1024*1024;
+  if(isVideo){
+    if(f.size>200*1024*1024){toast('Video max 200MB','err');return;}
+    if(f.size>INLINE_LIMIT){
+      // Large video: create an object URL for LOCAL playback only, send metadata
+      const objUrl=URL.createObjectURL(f);
+      const msgId=uid();
+      // Store object URL in memory for this session
+      window._localMedia=window._localMedia||{};
+      window._localMedia[msgId]=objUrl;
+      push({type:'video',data:'',fname:f.name,fsz:fmtSz(f.size),ftype:f.type,large:true,localId:msgId});
+      toast('Video sent (visible on this device this session)','info');
+      return;
+    }
   } else {
     if(f.size>10*1024*1024){toast('Image max 10MB','err');return;}
+    if(f.size>INLINE_LIMIT){
+      // Compress image before sending
+      compressAndSendImage(f);return;
+    }
   }
   toast('Sending…','info');
   const r=new FileReader();
-  r.onload=e=>{
-    const d=e.target.result;
-    if(d.length>9000000){
-      push({type:'img',data:'',fname:f.name,ftype:f.type,fsz:fmtSz(f.size),large:true});
-      toast('Media too large for cloud — sent locally only','info');
-    } else {
-      push({type:'img',data:d,fname:f.name,ftype:f.type});
-    }
-  };
+  r.onload=e=>push({type:'img',data:e.target.result,fname:f.name,ftype:f.type});
   r.onerror=()=>toast('Cannot read file','err');
   r.readAsDataURL(f);
+}
+
+function compressAndSendImage(file){
+  const img=new Image();
+  const url=URL.createObjectURL(file);
+  img.onload=()=>{
+    URL.revokeObjectURL(url);
+    const canvas=document.createElement('canvas');
+    const MAX=1200;
+    let w=img.width,h=img.height;
+    if(w>MAX){h=Math.round(h*MAX/w);w=MAX;}
+    if(h>MAX){w=Math.round(w*MAX/h);h=MAX;}
+    canvas.width=w;canvas.height=h;
+    canvas.getContext('2d').drawImage(img,0,0,w,h);
+    const compressed=canvas.toDataURL('image/jpeg',0.75);
+    push({type:'img',data:compressed,fname:file.name,ftype:'image/jpeg'});
+    toast('Image sent (compressed)','ok');
+  };
+  img.onerror=()=>toast('Cannot process image','err');
+  img.src=url;
 }
 function onFile(inp){
   const f=inp.files[0];
@@ -1747,9 +1814,14 @@ function startCall(type){
     });
   }
   // Get media and start WebRTC as offerer
+  const audioConstraints={
+    echoCancellation:true,
+    noiseSuppression:true,
+    autoGainControl:true
+  };
   const constraints=type==='video'
-    ?{video:{facingMode:'user',width:{ideal:640},height:{ideal:480}},audio:true}
-    :{audio:true,video:false};
+    ?{video:{facingMode:'user',width:{ideal:640},height:{ideal:480}},audio:audioConstraints}
+    :{audio:audioConstraints,video:false};
   navigator.mediaDevices.getUserMedia(constraints)
     .then(stream=>{
       localStream=stream;
@@ -1776,28 +1848,54 @@ function _forceEndCall(){
   if(localStream){localStream.getTracks().forEach(t=>t.stop());localStream=null;}
   if(peerConn){try{peerConn.close();}catch(e){} peerConn=null;}
   document.getElementById('csLocalVid').innerHTML='📷<div class="cs-vid-lbl">You</div>';
+  document.getElementById('csLocalVid').style.display='none';
   document.getElementById('csRing').classList.remove('ringing');
   document.getElementById('callScr').classList.remove('on');
+  document.getElementById('callScr').classList.remove('video-active');
+  document.getElementById('csCallInfo').style.opacity='1';
+  document.getElementById('csCallInfo').style.pointerEvents='auto';
+  document.getElementById('csRemoteVid').innerHTML='👤<div class="cs-vid-lbl" id="csVidLbl"></div>';
+  window._speakerOn=false;
   callSecs=0;callConnected=false;
   toast('Call ended','info');
 }
 
 function showLocalVideo(stream){
-  const box=document.getElementById('csLocalVid');box.innerHTML='';
+  const box=document.getElementById('csLocalVid');
+  box.innerHTML='';
+  box.style.display='block';
   const vid=document.createElement('video');
   vid.autoplay=true;vid.muted=true;vid.playsInline=true;
-  vid.style.cssText='position:absolute;inset:0;width:100%;height:100%;object-fit:cover;border-radius:14px';
-  vid.srcObject=stream;box.appendChild(vid);
-  const lbl=document.createElement('div');lbl.className='cs-vid-lbl';lbl.textContent='You';box.appendChild(lbl);
+  vid.style.cssText='position:absolute;inset:0;width:100%;height:100%;object-fit:cover';
+  vid.srcObject=stream;
+  box.appendChild(vid);
+  const lbl=document.createElement('div');
+  lbl.className='cs-vid-lbl';lbl.textContent='You';
+  box.appendChild(lbl);
+  // Show call screen as video-active (hides audio UI)
+  document.getElementById('callScr').classList.add('video-active');
+  document.getElementById('csCallInfo').style.opacity='0';
+  document.getElementById('csCallInfo').style.pointerEvents='none';
 }
 
 function showRemoteVideo(stream){
-  const box=document.getElementById('csRemoteVid');box.innerHTML='';
+  window._remoteStream=stream;
+  const box=document.getElementById('csRemoteVid');
+  box.innerHTML='';
   const vid=document.createElement('video');
   vid.autoplay=true;vid.playsInline=true;
-  vid.style.cssText='position:absolute;inset:0;width:100%;height:100%;object-fit:cover;border-radius:14px';
-  vid.srcObject=stream;box.appendChild(vid);
-  const lbl=document.createElement('div');lbl.className='cs-vid-lbl';lbl.id='csVidLbl';lbl.textContent=document.getElementById('csName')?.textContent||'Remote';box.appendChild(lbl);
+  // Do NOT mute remote video — this is how we hear the other person
+  vid.muted=false;
+  vid.volume=1;
+  vid.style.cssText='position:absolute;inset:0;width:100%;height:100%;object-fit:cover';
+  vid.srcObject=stream;
+  box.appendChild(vid);
+  // Restore caller name label
+  const lbl=document.createElement('div');
+  lbl.className='cs-vid-lbl';
+  lbl.id='csVidLbl';
+  lbl.textContent=document.getElementById('csName')?.textContent||'Remote';
+  box.appendChild(lbl);
 }
 
 /* ═══ WEBRTC PEER CONNECTION ═══ */
@@ -1939,9 +2037,10 @@ function acceptCall(fromId,callId,type,chatId){
   // Set active chat (do NOT call openChat - it disrupts the call UI)
   if(chatId) AC=chatId;
   // Request media and start WebRTC as answerer
+  const audioConstraints={echoCancellation:true,noiseSuppression:true,autoGainControl:true};
   const constraints=type==='video'
-    ?{video:{facingMode:'user',width:{ideal:640},height:{ideal:480}},audio:true}
-    :{audio:true,video:false};
+    ?{video:{facingMode:'user',width:{ideal:640},height:{ideal:480}},audio:audioConstraints}
+    :{audio:audioConstraints,video:false};
   navigator.mediaDevices.getUserMedia(constraints)
     .then(stream=>{
       localStream=stream;
@@ -1977,8 +2076,25 @@ function connectCall(){
   document.getElementById('csStatus').textContent=callType==='video'?'📹 Video Call':'📞 Voice Call';
   document.getElementById('csTimer').style.display='block';
   clearInterval(callTimer);
-  callTimer=setInterval(()=>{callSecs++;const m=Math.floor(callSecs/60),s=callSecs%60;document.getElementById('csTimer').textContent=(m<10?'0':'')+m+':'+(s<10?'0':'')+s},1000);
-  // Call connected - both sides can now see each other's camera
+  callTimer=setInterval(()=>{
+    callSecs++;
+    const m=Math.floor(callSecs/60),s=callSecs%60;
+    document.getElementById('csTimer').textContent=(m<10?'0':'')+m+':'+(s<10?'0':'')+s;
+  },1000);
+  // Default speaker: ON for video, OFF for audio (earpiece)
+  window._speakerOn = callType==='video';
+  const btn=document.getElementById('csSpeaker');
+  const lbl=document.getElementById('csSpkLbl');
+  if(window._speakerOn){
+    if(btn){btn.textContent='🔊';btn.classList.add('active');}
+    if(lbl)lbl.textContent='Speaker';
+  } else {
+    if(btn){btn.textContent='🔈';btn.classList.remove('active');}
+    if(lbl)lbl.textContent='Speaker';
+  }
+  // Reset mic/cam buttons
+  const micBtn=document.getElementById('csMic');
+  if(micBtn){micBtn.style.background='rgba(255,255,255,.2)';micBtn.textContent='🎤';}
 }
 function endCall(){
   const cid=window._activeCallId;
@@ -1996,21 +2112,72 @@ function endCall(){
   }
   const wasConnected=callConnected;
   const dur=callSecs>0?Math.floor(callSecs/60)+':'+(callSecs%60<10?'0':'')+callSecs%60:null;
-  window._activeCallId=null;
-  window._outgoingCallId=null;
+  window._activeCallId=null;window._outgoingCallId=null;window._speakerOn=false;
   clearInterval(callTimer);callTimer=null;stopRingTone();
   if(localStream){localStream.getTracks().forEach(t=>t.stop());localStream=null;}
+  if(peerConn){try{peerConn.close();}catch(e){} peerConn=null;}
+  // Reset call screen
   document.getElementById('csLocalVid').innerHTML='📷<div class="cs-vid-lbl">You</div>';
+  document.getElementById('csLocalVid').style.display='none';
   document.getElementById('csRing').classList.remove('ringing');
-  document.getElementById('callScr').classList.remove('on');
+  document.getElementById('callScr').classList.remove('on','video-active');
+  document.getElementById('callScr').classList.remove('video-active');
+  document.getElementById('csCallInfo').style.opacity='1';
+  document.getElementById('csCallInfo').style.pointerEvents='auto';
+  document.getElementById('csRemoteVid').innerHTML='👤<div class="cs-vid-lbl" id="csVidLbl"></div>';
+  // Post call message
   if(AC&&wasConnected&&dur) push({type:'text',text:(callType==='video'?'📹 Video':'📞 Voice')+' call ended · '+dur});
   else if(AC&&!wasConnected) push({type:'text',text:(callType==='video'?'📹 Video':'📞 Voice')+' call missed'});
   callSecs=0;callConnected=false;
   toast('Call ended','info');
 }
-function toggleCallMic(){callMuted=!callMuted;if(localStream)localStream.getAudioTracks().forEach(t=>t.enabled=!callMuted);document.getElementById('csMic').textContent=callMuted?'🔇':'🎤';document.getElementById('csMic').classList.toggle('muted',callMuted);toast(callMuted?'🔇 Muted':'🎤 Unmuted','info')}
-function toggleCallCam(){callCamOff=!callCamOff;if(localStream)localStream.getVideoTracks().forEach(t=>t.enabled=!callCamOff);document.getElementById('csCam').textContent=callCamOff?'📵':'📹';toast(callCamOff?'📵 Camera off':'📹 Camera on','info')}
-function toggleSpk(){toast('🔊 Speaker toggled','info')}
+function toggleCallMic(){
+  callMuted=!callMuted;
+  if(localStream) localStream.getAudioTracks().forEach(t=>t.enabled=!callMuted);
+  const btn=document.getElementById('csMic');
+  if(callMuted){
+    btn.textContent='🔇';
+    btn.style.background='rgba(244,63,94,.4)';
+    btn.classList.add('muted');
+  } else {
+    btn.textContent='🎤';
+    btn.style.background='rgba(255,255,255,.15)';
+    btn.classList.remove('muted');
+  }
+  toast(callMuted?'🔇 Muted':'🎤 Unmuted','info');
+}
+function toggleCallCam(){
+  callCamOff=!callCamOff;
+  if(localStream) localStream.getVideoTracks().forEach(t=>t.enabled=!callCamOff);
+  const btn=document.getElementById('csCam');
+  if(callCamOff){
+    btn.textContent='📵';
+    btn.style.background='rgba(244,63,94,.4)';
+  } else {
+    btn.textContent='📹';
+    btn.style.background='rgba(255,255,255,.15)';
+  }
+  toast(callCamOff?'📵 Camera off':'📹 Camera on','info');
+}
+function toggleSpk(){
+  window._speakerOn=!window._speakerOn;
+  const btn=document.getElementById('csSpeaker');
+  const lbl=document.getElementById('csSpkLbl');
+  if(window._speakerOn){
+    if(btn){btn.textContent='🔊';btn.classList.add('active');}
+    if(lbl)lbl.textContent='Speaker';
+    toast('🔊 Speaker on','ok');
+  } else {
+    if(btn){btn.textContent='🔈';btn.classList.remove('active');}
+    if(lbl)lbl.textContent='Earpiece';
+    toast('🔈 Earpiece','info');
+  }
+  // Apply to remote video element if exists
+  const remoteVid=document.querySelector('#csRemoteVid video');
+  if(remoteVid){
+    remoteVid.volume=window._speakerOn?1:0.3;
+  }
+}
 
 /* ═══ CHAT MANAGEMENT ═══ */
 function openNewChat(){document.getElementById('ncSrch').value='';renderPick('nc');openOv('newChatOv')}
@@ -2073,7 +2240,40 @@ function openFbSetup(){
   closeOv('myProfOv');
   document.getElementById('fbSetupOv')?.classList.add('on');
 }
-function chgMyAv(inp){const f=inp.files[0];if(!f)return;const r=new FileReader();r.onload=e=>{const us=gUsers();ME.av=e.target.result;us[ME.id]=ME; if(FB_READY&&DB_FB) DB_FB.ref('pulse/p3_users/'+ME.id).set(ME).catch(()=>{}); localStorage.setItem('p3_users',JSON.stringify(us));document.getElementById('myProfAv').innerHTML=avH(ME,84,20);updateDockAv();renderChatList();if(AC)renderMsgs()};r.readAsDataURL(f)}
+function chgMyAv(inp){
+  const f=inp.files[0];
+  if(!f){return;}
+  if(f.size>5*1024*1024){toast('Profile photo max 5MB','err');inp.value='';return;}
+  const reader=new FileReader();
+  reader.onload=e=>{
+    const dataUrl=e.target.result;
+    ME.av=dataUrl;
+    const us=gUsers();
+    us[ME.id]=ME;
+    localStorage.setItem('p3_users',JSON.stringify(us));
+    if(FB_READY&&DB_FB){
+      DB_FB.ref('pulse/p3_users/'+ME.id).update({av:dataUrl}).catch(e=>console.warn('av update:',e));
+    }
+    // Update every avatar element showing current user
+    const profAvEl=document.getElementById('myProfAv');
+    if(profAvEl){
+      const img=document.createElement('img');
+      img.style.cssText='width:84px;height:84px;border-radius:20px;object-fit:cover;border:3px solid var(--p);display:block;cursor:pointer';
+      img.src=dataUrl;
+      img.onclick=()=>document.getElementById('chgAv').click();
+      profAvEl.innerHTML='';
+      profAvEl.appendChild(img);
+    }
+    updateDockAv();
+    renderChatList();
+    if(AC) renderMsgs();
+    toast('Profile photo updated ✓','ok');
+  };
+  reader.onerror=()=>toast('Could not read image','err');
+  reader.readAsDataURL(f);
+  // Reset so same file can be selected again
+  inp.value='';
+}
 function saveMyProf(){const n=document.getElementById('pN').value.trim(),ab=document.getElementById('pAb').value.trim();if(!n){toast('Name required','err');return}const us=gUsers();ME.name=n;ME.about=ab;us[ME.id]=ME; if(FB_READY&&DB_FB) DB_FB.ref('pulse/p3_users/'+ME.id).set(ME).catch(()=>{}); localStorage.setItem('p3_users',JSON.stringify(us));updateDockAv();renderChatList();if(AC)renderMsgs();closeOv('myProfOv');toast('Profile saved ✓','ok')}
 
 
