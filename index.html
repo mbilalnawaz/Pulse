@@ -946,10 +946,13 @@ const fmtSz=b=>b<1024?b+' B':b<1048576?(b/1024).toFixed(1)+' KB':(b/1048576).toF
 const gUsers=()=>DB.g('p3_users',{});
 const gChats=()=>DB.g('p3_chats',{});
 const gMsgs=id=>{
-  // Try new storage key first, fallback to old
-  const msgs=DB.g('p3_m_'+id,[]);
-  return Array.isArray(msgs)?msgs:Object.values(msgs||{}).sort((a,b)=>a.ts-b.ts);
+  const raw=DB.g('p3_m_'+id,null);
+  if(!raw) return [];
+  if(Array.isArray(raw)) return raw;
+  // Handle object format from Firebase
+  return Object.values(raw).sort((a,b)=>a.ts-b.ts);
 };
+
 const gTx=()=>DB.g('p3_tx',[]);
 const gBuds=()=>DB.g('p3_buds',{});
 const lastMsg=id=>{const m=gMsgs(id);return m.length?m[m.length-1]:null};
@@ -1343,7 +1346,16 @@ function goBack(){
   // This prevents the "goes back and closes everything" issue
 }
 function updateChatSub(){if(!AC)return;const c=gChats()[AC];if(!c)return;const us=gUsers();let sub='';if(c.type==='grp')sub=c.members.length+' members';else{const o=chatOther(c,us);sub=o?.online?'🟢 online':o?.seen?'Last seen '+fmtT(o.seen):'Offline'}document.getElementById('mhSb').textContent=sub}
-function markRead(id){const msgs=gMsgs(id);let ch=false;msgs.forEach(m=>{if(m.uid!==ME.id&&!(m.rb||[]).includes(ME.id)){m.rb=[...(m.rb||[]),ME.id];ch=true}});if(ch)DB.s('p3_m_'+id,msgs,true)}  /* silent! */
+function markRead(id){
+  if(!id) return;
+  const msgs=gMsgs(id);let ch=false;
+  msgs.forEach(m=>{
+    if(m.uid!==ME?.id&&!(m.rb||[]).includes(ME?.id)){
+      m.rb=[...(m.rb||[]),ME.id];ch=true;
+    }
+  });
+  if(ch) DB.s('p3_m_'+id,msgs,true);
+}  /* silent! */
 
 /* ═══ RENDER MESSAGES ═══ */
 function renderMsgs(){
@@ -1478,53 +1490,42 @@ function sendTxt(){
   document.getElementById('micBtn').style.display='flex';
 }
 function push(data){
+  if(!AC) return;
   const msgs=gMsgs(AC);
   const newMsg={id:uid(),ts:Date.now(),uid:ME.id,rb:[ME.id],...data};
   msgs.push(newMsg);
-  // Write to localStorage immediately for instant render
-  localStorage.setItem('p3_m_'+AC, JSON.stringify(msgs));
+  localStorage.setItem('p3_m_'+AC,JSON.stringify(msgs));
   renderMsgs();renderChatList();
-  // Write to Firebase - use individual message node (avoids 1MB array limit)
-  if(FB_READY && DB_FB){
-    // Store each message by its ID - much more scalable than storing whole array
-    const msgData = {...newMsg};
-    // Firebase Realtime DB limit: 10MB per node
-    // Base64 encoding adds ~33% overhead, so 7MB file = ~10MB base64
-    const dataSize = msgData.data ? msgData.data.length : 0;
-    if(dataSize > 9000000){
-      // Too large for Firebase - send metadata only, data stays local
-      const metaOnly = {...msgData, data:'', large:true};
-      DB_FB.ref('pulse/msgs/'+AC+'/'+newMsg.id).set(metaOnly)
-        .catch(e=>console.warn('meta write error:',e));
-      toast('File sent locally (too large for cloud sync)','info');
-    } else {
-      DB_FB.ref('pulse/msgs/'+AC+'/'+newMsg.id).set(msgData)
-        .catch(e=>{
-          console.warn('msg write error:',e);
-          // Try sending metadata only as fallback
-          const metaOnly = {...msgData, data:'', large:true};
-          DB_FB.ref('pulse/msgs/'+AC+'/'+newMsg.id).set(metaOnly).catch(()=>{});
-          toast('File sent locally (upload failed)','info');
-        });
-    }
-    // Update chat metadata
-    const ch=gChats();
-    const preview = data.type==='text'?(data.text||'').slice(0,80):data.type==='img'?'📷 Photo':data.type==='voice'?'🎤 Voice':data.type==='file'?('📄 '+data.fname):data.type==='poll'?'📊 Poll':'Message';
-    if(ch[AC]){
-      ch[AC].upd=Date.now();
-      ch[AC].lastMsg=preview;
-      ch[AC].lastUid=ME.id;
-      DB_FB.ref('pulse/p3_chats/'+AC).update({upd:Date.now(),lastMsg:preview,lastUid:ME.id}).catch(()=>{});
-      DB.s('p3_chats',ch,true);
-    }
-    // Push call notification to other user via Firebase
-    if(data._callNotif){
-      DB_FB.ref('pulse/calls/'+data._callNotif.to).set({
-        from:ME.id,fromName:ME.name,type:data._callNotif.callType,ts:Date.now(),chatId:AC
-      }).catch(()=>{});
-    }
-  } else {
+  if(!FB_READY||!DB_FB){
     const ch=gChats();if(ch[AC]){ch[AC].upd=Date.now();DB.s('p3_chats',ch,true);}
+    addNotifMsg(data);return;
+  }
+  const msgData={...newMsg};
+  const dataLen=msgData.data?msgData.data.length:0;
+  if(dataLen>9000000){
+    // Strip data for Firebase, keep everything else
+    const metaMsg={...msgData,data:'',large:true};
+    DB_FB.ref('pulse/msgs/'+AC+'/'+newMsg.id).set(metaMsg).catch(()=>{});
+    toast('File too large for cloud sync — visible on this device only','info');
+  } else {
+    // Send full message including audio/image data
+    DB_FB.ref('pulse/msgs/'+AC+'/'+newMsg.id).set(msgData)
+      .catch(e=>{
+        console.warn('Firebase write error:',e.code,e.message);
+        toast('Message saved locally','info');
+      });
+  }
+  // Update chat metadata
+  const ch=gChats();
+  const preview=data.type==='text'?(data.text||'').slice(0,80)
+    :data.type==='img'?'📷 Photo'
+    :data.type==='voice'?'🎤 Voice message'
+    :data.type==='file'?'📎 '+data.fname
+    :data.type==='poll'?'📊 Poll':'Message';
+  if(ch[AC]){
+    ch[AC].upd=Date.now();ch[AC].lastMsg=preview;ch[AC].lastUid=ME.id;
+    localStorage.setItem('p3_chats',JSON.stringify(ch));
+    DB_FB.ref('pulse/p3_chats/'+AC).update({upd:Date.now(),lastMsg:preview,lastUid:ME.id}).catch(()=>{});
   }
   addNotifMsg(data);
 }
@@ -1690,9 +1691,8 @@ function toggleMsgSrch(){const b=document.getElementById('msgSrchBar');b.style.d
 /* ═══ CALLS ═══ */
 function startCall(type){
   if(!AC)return;
-  callType=type;callSecs=0;callMuted=false;callCamOff=false;callConnected=false;
+  callType=type; callSecs=0; callMuted=false; callCamOff=false; callConnected=false;
   const c=gChats()[AC],us=gUsers(),nm=chatNm(c,us),other=chatOther(c,us);
-  // Show outgoing call UI
   document.getElementById('csName').textContent=nm;
   document.getElementById('csStatus').textContent=type==='video'?'📹 Calling…':'📞 Calling…';
   document.getElementById('csVidLbl').textContent=nm;
@@ -1707,17 +1707,20 @@ function startCall(type){
     :`<div class="cs-av-ph" style="background:${other?.col||cFor(nm)}">${ini(nm)}</div>`;
   document.getElementById('callScr').classList.add('on');
   startRingTone();
-  // Notify other user via Firebase
-  if(FB_READY && DB_FB){
-    const callId=uid();
-    window._outgoingCallId=callId;
-    window._activeCallId=callId;
+  // Generate callId FIRST - both getUserMedia and Firebase need it
+  const callId=uid();
+  window._outgoingCallId=callId;
+  window._activeCallId=callId;
+  // Notify recipients
+  if(FB_READY&&DB_FB){
     const isGroup=c?.type==='grp';
     const targets=isGroup?(c.members||[]).filter(id=>id!==ME.id):(other?[other.id]:[]);
-    if(!targets.length){toast('No one to call','info');document.getElementById('callScr').classList.remove('on');stopRingTone();return;}
-    const callData={callId,from:ME.id,fromName:ME.name,fromAv:ME.av||'',type,chatId:AC,ts:Date.now(),groupName:isGroup?c.name:null};
+    if(!targets.length){toast('No one to call','info');endCall();return;}
+    const callData={callId,from:ME.id,fromName:ME.name,fromAv:ME.av||'',
+      type,chatId:AC,ts:Date.now(),groupName:isGroup?c.name:null};
     targets.forEach(tid=>DB_FB.ref('pulse/calls/'+tid).set(callData).catch(()=>{}));
     DB_FB.ref('pulse/callStatus/'+callId).set({status:'ringing',ts:Date.now()}).catch(()=>{});
+    // Listen for answer
     DB_FB.ref('pulse/calls/'+ME.id+'/answer').on('value',snap=>{
       if(!snap.exists())return;
       const ans=snap.val();
@@ -1732,50 +1735,51 @@ function startCall(type){
           stopRingTone();
           document.getElementById('callScr').classList.remove('on');
           document.getElementById('csRing').classList.remove('ringing');
-          push({type:'text',text:(type==='video'?'📹 Video':'📞 Voice')+' call declined'});
           toast('Call declined','info');
         }
       }
     });
+    // Listen for remote end
     DB_FB.ref('pulse/callStatus/'+callId).on('value',snap=>{
       if(!snap.exists()&&window._activeCallId===callId&&callConnected){
-        window._activeCallId=null;
-        clearInterval(callTimer);callTimer=null;stopRingTone();
-        if(localStream){localStream.getTracks().forEach(t=>t.stop());localStream=null;}
-        stopWebRTC(callId);
-        document.getElementById('csLocalVid').innerHTML='📷<div class="cs-vid-lbl">You</div>';
-        document.getElementById('csRing').classList.remove('ringing');
-        document.getElementById('callScr').classList.remove('on');
-        callSecs=0;callConnected=false;
-        toast('Call ended','info');
+        _forceEndCall();
       }
     });
   }
-  // Request camera/mic
-  const constraints=type==='video'?{video:{facingMode:'user',width:{ideal:640},height:{ideal:480}},audio:true}:{audio:true,video:false};
-  navigator.mediaDevices.getUserMedia(constraints).then(stream=>{
-    localStream=stream;
-    if(type==='video'){
-      showLocalVideo(stream);
-      document.getElementById('csVids').classList.add('on');
-      document.getElementById('csCamWrap').style.display='flex';
-    }
-    // Start WebRTC as caller (offerer)
-    if(window._activeCallId) startWebRTC(stream, true, window._activeCallId);
-  }).catch(e=>{
-    if(e.name==='NotAllowedError'||e.name==='PermissionDeniedError')
-      toast('Camera/mic blocked — open browser Settings → Site Settings → Allow Camera & Microphone','err');
-    else if(e.name==='NotFoundError')
-      toast('No camera/mic found on this device','err');
-    else
-      toast('Camera/mic error: '+e.message,'err');
-    // Audio-only fallback for video calls
-    if(callType==='video'&&localStream===null){
-      navigator.mediaDevices.getUserMedia({audio:true,video:false})
-        .then(s=>{localStream=s;if(window._activeCallId)startWebRTC(s,true,window._activeCallId);})
-        .catch(()=>{});
-    }
-  });
+  // Get media and start WebRTC as offerer
+  const constraints=type==='video'
+    ?{video:{facingMode:'user',width:{ideal:640},height:{ideal:480}},audio:true}
+    :{audio:true,video:false};
+  navigator.mediaDevices.getUserMedia(constraints)
+    .then(stream=>{
+      localStream=stream;
+      if(type==='video'){
+        showLocalVideo(stream);
+        document.getElementById('csVids').classList.add('on');
+        document.getElementById('csCamWrap').style.display='flex';
+      }
+      startWebRTC(stream, true, callId);
+    })
+    .catch(e=>{
+      if(e.name==='NotAllowedError'||e.name==='PermissionDeniedError')
+        toast('Camera/mic blocked — open browser Settings → Site Settings → Allow Camera & Mic','err');
+      else if(e.name==='NotFoundError')
+        toast('No camera/mic found on this device','err');
+      else
+        toast('Camera/mic error: '+e.message,'err');
+    });
+}
+
+function _forceEndCall(){
+  window._activeCallId=null;
+  clearInterval(callTimer);callTimer=null;stopRingTone();
+  if(localStream){localStream.getTracks().forEach(t=>t.stop());localStream=null;}
+  if(peerConn){try{peerConn.close();}catch(e){} peerConn=null;}
+  document.getElementById('csLocalVid').innerHTML='📷<div class="cs-vid-lbl">You</div>';
+  document.getElementById('csRing').classList.remove('ringing');
+  document.getElementById('callScr').classList.remove('on');
+  callSecs=0;callConnected=false;
+  toast('Call ended','info');
 }
 
 function showLocalVideo(stream){
@@ -1801,55 +1805,64 @@ let peerConn=null;
 const RTC_CONFIG={iceServers:[{urls:'stun:stun.l.google.com:19302'},{urls:'stun:stun1.l.google.com:19302'}]};
 
 function startWebRTC(stream, isOfferer, callId){
-  if(!FB_READY||!DB_FB)return;
+  if(!FB_READY||!DB_FB||!callId) return;
   try{
+    if(peerConn){try{peerConn.close();}catch(e){}}
     peerConn=new RTCPeerConnection(RTC_CONFIG);
-    // Add local tracks
     stream.getTracks().forEach(t=>peerConn.addTrack(t,stream));
-    // When remote track arrives - show it
     peerConn.ontrack=e=>{
-      if(e.streams[0]) showRemoteVideo(e.streams[0]);
+      if(e.streams&&e.streams[0]) showRemoteVideo(e.streams[0]);
     };
-    // ICE candidate exchange via Firebase
     peerConn.onicecandidate=e=>{
-      if(e.candidate&&callId){
-        DB_FB.ref('pulse/webrtc/'+callId+'/'+(isOfferer?'offerCandidates':'answerCandidates')).push(e.candidate.toJSON()).catch(()=>{});
-      }
+      if(!e.candidate||!callId) return;
+      DB_FB.ref('pulse/webrtc/'+callId+'/'+(isOfferer?'offerCandidates':'answerCandidates'))
+        .push(e.candidate.toJSON()).catch(()=>{});
+    };
+    peerConn.onconnectionstatechange=()=>{
+      console.log('WebRTC state:',peerConn.connectionState);
     };
     const sigRef=DB_FB.ref('pulse/webrtc/'+callId);
     if(isOfferer){
-      // Create offer
-      peerConn.createOffer().then(offer=>peerConn.setLocalDescription(offer)).then(()=>{
-        sigRef.child('offer').set({type:peerConn.localDescription.type,sdp:peerConn.localDescription.sdp}).catch(()=>{});
-      }).catch(e=>console.warn('offer error:',e));
-      // Listen for answer
+      peerConn.createOffer({offerToReceiveAudio:true,offerToReceiveVideo:callType==='video'})
+        .then(offer=>peerConn.setLocalDescription(offer))
+        .then(()=>sigRef.child('offer').set({
+          type:peerConn.localDescription.type,
+          sdp:peerConn.localDescription.sdp
+        }))
+        .catch(e=>console.warn('WebRTC offer error:',e));
+      // Listen for answer - use 'on' to handle any timing
       sigRef.child('answer').on('value',snap=>{
-        if(!snap.exists()||peerConn.remoteDescription)return;
-        const ans=new RTCSessionDescription(snap.val());
-        peerConn.setRemoteDescription(ans).catch(e=>console.warn('setRemote error:',e));
+        if(!snap.exists()||!peerConn||peerConn.remoteDescription) return;
+        peerConn.setRemoteDescription(new RTCSessionDescription(snap.val()))
+          .catch(e=>console.warn('setRemoteDesc error:',e));
       });
       // Listen for answer ICE candidates
       sigRef.child('answerCandidates').on('child_added',snap=>{
-        if(!snap.exists())return;
+        if(!snap.exists()||!peerConn) return;
         peerConn.addIceCandidate(new RTCIceCandidate(snap.val())).catch(()=>{});
       });
     } else {
-      // Listen for offer from caller
-      sigRef.child('offer').once('value').then(snap=>{
-        if(!snap.exists())return;
-        const offer=new RTCSessionDescription(snap.val());
-        return peerConn.setRemoteDescription(offer);
-      }).then(()=>peerConn.createAnswer()).then(ans=>peerConn.setLocalDescription(ans)).then(()=>{
-        sigRef.child('answer').set({type:peerConn.localDescription.type,sdp:peerConn.localDescription.sdp}).catch(()=>{});
-      }).catch(e=>console.warn('answer error:',e));
+      // Answerer: listen for offer with 'on' (handles race condition)
+      sigRef.child('offer').on('value',snap=>{
+        if(!snap.exists()||!peerConn||peerConn.remoteDescription) return;
+        peerConn.setRemoteDescription(new RTCSessionDescription(snap.val()))
+          .then(()=>peerConn.createAnswer())
+          .then(ans=>peerConn.setLocalDescription(ans))
+          .then(()=>sigRef.child('answer').set({
+            type:peerConn.localDescription.type,
+            sdp:peerConn.localDescription.sdp
+          }))
+          .catch(e=>console.warn('WebRTC answer error:',e));
+      });
       // Listen for offer ICE candidates
       sigRef.child('offerCandidates').on('child_added',snap=>{
-        if(!snap.exists())return;
+        if(!snap.exists()||!peerConn) return;
         peerConn.addIceCandidate(new RTCIceCandidate(snap.val())).catch(()=>{});
       });
     }
-  }catch(e){console.warn('WebRTC error:',e);}
+  }catch(e){console.warn('WebRTC setup error:',e);}
 }
+
 
 function stopWebRTC(callId){
   try{if(peerConn){peerConn.close();peerConn=null;}}catch(e){}
@@ -1893,53 +1906,60 @@ function acceptCall(fromId,callId,type,chatId){
   clearTimeout(window._incomingCallTimeout);
   stopRingTone();
   document.getElementById('incomingCallScr')?.remove();
+  // Set state immediately
+  window._activeCallId=callId||null;
+  callType=type; callSecs=0; callMuted=false; callConnected=true;
   // Tell caller we accepted
   if(FB_READY&&DB_FB){
     DB_FB.ref('pulse/calls/'+fromId+'/answer').set({callId,accepted:true,ts:Date.now()}).catch(()=>{});
   }
-  // Track active call ID for cross-device end detection
-  window._activeCallId=callId||null;
-  // Find or create the chat with the caller
-  if(chatId){
-    AC=chatId;
-    // Make sure we have this chat loaded
-    if(FB_READY&&DB_FB){
-      DB_FB.ref('pulse/p3_chats/'+chatId).once('value').then(snap=>{
-        if(snap.exists()){
-          const ch=DB.g('p3_chats',{});
-          ch[chatId]=snap.val();
-          localStorage.setItem('p3_chats',JSON.stringify(ch));
-        }
-        openChat(chatId);
-      }).catch(()=>openChat(chatId));
-    } else { openChat(chatId); }
-  }
-  callType=type;callSecs=0;callMuted=false;callConnected=true;
+  // Show call screen
+  const us=gUsers();
+  const nm=us[fromId]?.name||'Caller';
+  document.getElementById('csName').textContent=nm;
+  document.getElementById('csVidLbl').textContent=nm;
+  document.getElementById('csStatus').textContent=type==='video'?'📹 Connected':'📞 Connected';
+  document.getElementById('csTimer').style.display='block';
+  document.getElementById('csRing').classList.remove('ringing');
+  const callerUser=us[fromId];
+  document.getElementById('csAvCont').innerHTML=callerUser?.av
+    ?`<img class="cs-av-inner" src="${callerUser.av}">`
+    :`<div class="cs-av-ph" style="background:${callerUser?.col||cFor(fromId)}">${ini(nm)}</div>`;
   if(type==='video'){
     document.getElementById('csVids').classList.add('on');
     document.getElementById('csCamWrap').style.display='flex';
   }
-  const c=gChats()[AC]||{},us=gUsers();
-  const nm=us[fromId]?.name||'Caller';
-  document.getElementById('csName').textContent=nm;
-  document.getElementById('csStatus').textContent=type==='video'?'📹 Connected':'📞 Connected';
-  document.getElementById('csTimer').style.display='block';
-  document.getElementById('csRing').classList.remove('ringing');
   document.getElementById('callScr').classList.add('on');
   clearInterval(callTimer);
-  callTimer=setInterval(()=>{callSecs++;const m=Math.floor(callSecs/60),s=callSecs%60;document.getElementById('csTimer').textContent=(m<10?'0':'')+m+':'+(s<10?'0':'')+s;},1000);
-  // Request mic/camera and start WebRTC as answerer
-  const constraints=type==='video'?{video:{facingMode:'user',width:{ideal:640},height:{ideal:480}},audio:true}:{audio:true,video:false};
-  navigator.mediaDevices.getUserMedia(constraints).then(stream=>{
-    localStream=stream;
-    if(type==='video'){showLocalVideo(stream);}
-    // Start WebRTC as answerer
-    if(window._activeCallId) startWebRTC(stream, false, window._activeCallId);
-  }).catch(e=>{
-    if(e.name==='NotAllowedError'||e.name==='PermissionDeniedError')
-      toast('Camera/mic blocked — open browser Settings → Allow Camera & Microphone','err');
-    else toast('Camera/mic error: '+e.message,'err');
-  });
+  callTimer=setInterval(()=>{
+    callSecs++;
+    const m=Math.floor(callSecs/60),s=callSecs%60;
+    document.getElementById('csTimer').textContent=(m<10?'0':'')+m+':'+(s<10?'0':'')+s;
+  },1000);
+  // Set active chat (do NOT call openChat - it disrupts the call UI)
+  if(chatId) AC=chatId;
+  // Request media and start WebRTC as answerer
+  const constraints=type==='video'
+    ?{video:{facingMode:'user',width:{ideal:640},height:{ideal:480}},audio:true}
+    :{audio:true,video:false};
+  navigator.mediaDevices.getUserMedia(constraints)
+    .then(stream=>{
+      localStream=stream;
+      if(type==='video') showLocalVideo(stream);
+      startWebRTC(stream, false, callId);
+    })
+    .catch(e=>{
+      if(e.name==='NotAllowedError'||e.name==='PermissionDeniedError')
+        toast('Camera/mic blocked — go to browser Settings → Allow Camera & Microphone','err');
+      else
+        toast('Camera/mic error: '+e.message,'err');
+      // Try audio-only fallback for video calls
+      if(type==='video'){
+        navigator.mediaDevices.getUserMedia({audio:true,video:false})
+          .then(s=>{localStream=s;startWebRTC(s,false,callId);})
+          .catch(()=>{});
+      }
+    });
 }
 
 function declineCall(fromId,callId){
@@ -1961,33 +1981,31 @@ function connectCall(){
   // Call connected - both sides can now see each other's camera
 }
 function endCall(){
-  clearInterval(callTimer);callTimer=null;stopRingTone();
-  if(localStream){localStream.getTracks().forEach(t=>t.stop());localStream=null;}
-  if(FB_READY&&DB_FB&&ME){
-    // Remove all call-related Firebase nodes
-    DB_FB.ref('pulse/calls/'+ME.id).remove().catch(()=>{});
-    DB_FB.ref('pulse/calls/'+ME.id+'/answer').off();
-    // Remove shared call status (signals other side to close)
-    if(window._activeCallId){
-      DB_FB.ref('pulse/callStatus/'+window._activeCallId).remove().catch(()=>{});
-      DB_FB.ref('pulse/callStatus/'+window._activeCallId).off();
-      window._activeCallId=null;
+  const cid=window._activeCallId;
+  if(FB_READY&&DB_FB){
+    if(cid){
+      DB_FB.ref('pulse/callStatus/'+cid).remove().catch(()=>{});
+      DB_FB.ref('pulse/callStatus/'+cid).off();
+      DB_FB.ref('pulse/calls/'+ME.id+'/answer').off();
+      stopWebRTC(cid);
     }
-    // Remove outgoing call notification
     if(window._outgoingCallId&&AC){
       const c=gChats()[AC],us=gUsers(),other=chatOther(c,us);
       if(other)DB_FB.ref('pulse/calls/'+other.id).remove().catch(()=>{});
-      window._outgoingCallId=null;
     }
   }
+  const wasConnected=callConnected;
+  const dur=callSecs>0?Math.floor(callSecs/60)+':'+(callSecs%60<10?'0':'')+callSecs%60:null;
+  window._activeCallId=null;
+  window._outgoingCallId=null;
+  clearInterval(callTimer);callTimer=null;stopRingTone();
+  if(localStream){localStream.getTracks().forEach(t=>t.stop());localStream=null;}
   document.getElementById('csLocalVid').innerHTML='📷<div class="cs-vid-lbl">You</div>';
   document.getElementById('csRing').classList.remove('ringing');
   document.getElementById('callScr').classList.remove('on');
-  const dur=callSecs>0?Math.floor(callSecs/60)+':'+(callSecs%60<10?'0':'')+callSecs%60:null;
-  const wasConnected=callConnected;
+  if(AC&&wasConnected&&dur) push({type:'text',text:(callType==='video'?'📹 Video':'📞 Voice')+' call ended · '+dur});
+  else if(AC&&!wasConnected) push({type:'text',text:(callType==='video'?'📹 Video':'📞 Voice')+' call missed'});
   callSecs=0;callConnected=false;
-  if(AC&&wasConnected&&dur)push({type:'text',text:(callType==='video'?'📹 Video':'📞 Voice')+' call ended · '+dur});
-  else if(AC&&!wasConnected)push({type:'text',text:(callType==='video'?'📹 Video':'📞 Voice')+' call missed'});
   toast('Call ended','info');
 }
 function toggleCallMic(){callMuted=!callMuted;if(localStream)localStream.getAudioTracks().forEach(t=>t.enabled=!callMuted);document.getElementById('csMic').textContent=callMuted?'🔇':'🎤';document.getElementById('csMic').classList.toggle('muted',callMuted);toast(callMuted?'🔇 Muted':'🎤 Unmuted','info')}
